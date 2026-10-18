@@ -37,20 +37,25 @@ data, patent or trademark clearance.
 
 ## Qt and PySide
 
-The current desktop bundle uses Qt Core, Gui, Network, Pdf, Svg and Widgets
-with PySide6/Shiboken 6.11.2. QtPdf is present through an image plugin; do not
-assume that omitting QtWebEngine's Python API removes PDFium/Chromium-related
-third-party notice obligations.
+The desktop bundle uses Qt Core, Gui, Network, Svg and Widgets with
+PySide6/Shiboken 6.11.2. The optional Qt PDF image-format plugin and Qt6Pdf
+library are excluded: BotStudio has no PDF import or PDF-rendering workflow.
+Likewise, OpenCV's optional FFmpeg video backend is excluded; BotStudio uses
+OpenCV for still-image processing and has no video capture or encoding path.
+`verify_windows.ps1` rejects those binaries if a future build accidentally
+reintroduces them. The image-preview and offline-OCR executable self-tests
+remain required after this packaging change.
 
 The GPLv3 and LGPLv3 texts are supplied in each Qt/PySide package's `upstream`
 directory. These texts alone do not replace the modules' copyright and
 third-party attributions. The wheel's commercial-license placeholder is not
 treated as the complete open-source notice set.
 
-Exact-version upstream source locations:
+Exact-version upstream source locations for the Qt/PySide components that
+remain in the bundle:
 
 - [Qt 6.11.2 source modules](https://download.qt.io/official_releases/qt/6.11/6.11.2/submodules/)
-  (qtbase, qtsvg, qtimageformats and qtwebengine for QtPdf).
+  (qtbase, qtsvg and qtimageformats).
 - [PySide/Shiboken 6.11.2 source](https://download.qt.io/official_releases/QtForPython/pyside6/PySide6-6.11.2-src/)
 - [QtBase source commit](https://github.com/qt/qtbase/tree/ef55f427f2c8b410d34f8a7681020a3000cf6866)
 - [PySide source commit](https://github.com/pyside/pyside-setup/tree/24627cd36e1593adf22eb1f2950e4248e7bcc1ec)

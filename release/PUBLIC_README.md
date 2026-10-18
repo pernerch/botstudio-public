@@ -9,6 +9,14 @@ applicable BotStudio material. See [LICENSE](LICENSE) and
 [LICENSE-NOTICE.txt](LICENSE-NOTICE.txt). Third-party components and
 user-created packages retain their own terms.
 
+## Value or variable inputs
+
+Variable-capable Function parameters, OCR queries and Helper arguments use a
+leading **Fixed value / Variable** selector with one active input. Switching
+modes clears the previous value. Existing `$name` references open in variable
+mode; entering a leading `$` also switches to variable mode to match runtime
+semantics. Output names and Variable-block targets remain variable-only.
+
 ## Source publication, not a binary release
 
 This repository starts with a clean snapshot of the current application

@@ -30,7 +30,7 @@
                      {
                          "id":  "qt-lgpl-source-and-notices",
                          "resolved":  false,
-                         "description":  "GPLv3/LGPLv3 texts, version-specific source locations and onedir replacement instructions are prepared. Complete Qt third-party attributions (including QtPdf/PDFium), binary-matched source/build delivery and independent replacement validation remain unresolved."
+                         "description":  "GPLv3/LGPLv3 texts, version-specific source locations and onedir replacement instructions are prepared. The unused QtPdf image plugin/Qt6Pdf.dll are excluded and verified absent. Complete attributions for the remaining Qt/PySide binaries, binary-matched source/build delivery and independent replacement validation remain unresolved."
                      },
                      {
                          "id":  "ocr-model-provenance",
@@ -40,7 +40,7 @@
                      {
                          "id":  "native-and-toolchain-notices",
                          "resolved":  false,
-                         "description":  "Review native dependencies, CPython/VC runtime, PyInstaller bootloader exception and bundled assets for redistribution requirements."
+                         "description":  "OpenCV\u0027s unused FFmpeg backend is excluded and verified absent. Remaining OpenCV, Shapely/GEOS, ONNX Runtime, Pillow, NumPy, CPython, Microsoft VC/UCRT and PyInstaller native components still need a complete binary-to-notice/source map and source/build delivery review."
                      },
                      {
                          "id":  "application-license",

@@ -11,6 +11,7 @@ from PyInstaller.utils.win32.versioninfo import (
 root = Path(SPECPATH).parent
 info = runpy.run_path(str(root / "services" / "application_info.py"))
 notice_collector = runpy.run_path(str(root / "release" / "collect_notices.py"))
+native_distribution = runpy.run_path(str(root / "release" / "native_distribution.py"))
 notices = notice_collector["collect_notices"](
     root / "release" / "requirements-runtime.txt", root / "build" / "third-party",
 )
@@ -69,12 +70,16 @@ studio = Analysis(
     hiddenimports=ocr_imports + ["onnxruntime"],
     excludes=excluded, noarchive=False,
 )
+studio.binaries = native_distribution["exclude_unused_native_entries"](studio.binaries)
+studio.datas = native_distribution["exclude_unused_native_entries"](studio.datas)
 watchdog = Analysis(
     [str(root / "watchdog_app.py")], pathex=[str(root)],
     binaries=[], datas=resources, hiddenimports=[],
     hookspath=[str(root / "release" / "hooks")],
     excludes=excluded, noarchive=False,
 )
+watchdog.binaries = native_distribution["exclude_unused_native_entries"](watchdog.binaries)
+watchdog.datas = native_distribution["exclude_unused_native_entries"](watchdog.datas)
 studio_exe = EXE(
     PYZ(studio.pure), studio.scripts, [],
     exclude_binaries=True, name="BotStudio",

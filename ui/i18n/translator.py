@@ -912,6 +912,12 @@ STRINGS = {
         "function.insert_variable":
             "Insert variable...",
 
+        "function.value_mode_literal":
+            "Fixed value",
+
+        "function.value_mode_variable":
+            "Variable",
+
         "function.region_selected":
             "OCR search region selected.",
 

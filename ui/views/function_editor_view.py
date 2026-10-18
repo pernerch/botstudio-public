@@ -113,6 +113,7 @@ from ui.widgets.profile_emulator_bar import ProfileEmulatorBar
 from ui.widgets.searchable_combo import SearchableComboBox
 from ui.widgets.event_create_dialog import EventCreateDialog
 from ui.widgets.variable_dialog import VariableCreateDialog
+from ui.widgets.variable_value_input import VariableValueInput
 
 
 class _EventChoiceSignals(QObject):
@@ -3048,6 +3049,10 @@ class FunctionEditorView(QWidget):
             "clear_region_button",
             "ocr_query_edit",
             "ocr_variable_combo",
+            "ocr_value_input",
+            "parameter_value_inputs",
+            "parameter_value_edits",
+            "parameter_variable_combos",
         ):
             if hasattr(self, attr):
                 delattr(self, attr)
@@ -3495,6 +3500,7 @@ class FunctionEditorView(QWidget):
 
         if is_raw_scope_field:
             combo = SearchableComboBox()
+            combo.setEnabled(self.is_editable())
             combo.setEditable(True)
             combo.addItem("", "")
             combo.lineEdit().setPlaceholderText(
@@ -3541,27 +3547,25 @@ class FunctionEditorView(QWidget):
             self.param_layout.addRow(self._parameter_label(key), row_widget)
             return
 
-        line = QLineEdit(str(block.params.get(key, default) or ""))
-        line.setEnabled(self.is_editable())
-        line.textChanged.connect(
-            lambda text: block.params.__setitem__(key, text)
+        value_input = self._make_value_input(
+            block.params.get(key, default),
+            lambda text: block.params.__setitem__(key, text),
         )
+        self.param_layout.addRow(self._parameter_label(key), value_input)
+        if not hasattr(self, "parameter_value_inputs"):
+            self.parameter_value_inputs = {}
+        self.parameter_value_inputs[(block.block_id, key)] = value_input
+        if not hasattr(self, "parameter_value_edits"):
+            self.parameter_value_edits = {}
+        self.parameter_value_edits[(block.block_id, key)] = value_input.literal_edit
+        if not hasattr(self, "parameter_variable_combos"):
+            self.parameter_variable_combos = {}
+        self.parameter_variable_combos[(block.block_id, key)] = value_input.variable_combo
 
-        variable_combo = SearchableComboBox()
-        variable_combo.addItem(t("function.insert_variable"), "")
-        for variable in self._collect_available_variables():
-            variable_combo.addItem(variable, variable)
-        variable_combo.setCurrentIndex(0)
-        variable_combo.setEnabled(self.is_editable())
-        variable_combo.textActivated.connect(line.setText)
-
-        line.textChanged.connect(
-            lambda text: self._sync_variable_picker(variable_combo, text)
-        )
-        self._sync_variable_picker(variable_combo, line.text())
-
-        create_button = QPushButton(t("variables.create"))
-        create_button.setEnabled(self.is_editable())
+    def _make_value_input(self, value, commit):
+        value_input = VariableValueInput(value, self._collect_available_variables())
+        value_input.setEnabled(self.is_editable())
+        value_input.valueChanged.connect(commit)
 
         def on_create_variable():
             new_value = self._open_variable_dialog()
@@ -3570,75 +3574,23 @@ class FunctionEditorView(QWidget):
             self.logger.info(
                 "Variable Created",
                 function_id=self.current_function.function_id if self.current_function else "",
-                block_type=block.block_type,
                 variable=new_value,
             )
-            display_value = f"${new_value}"
-            if variable_combo.findText(display_value) < 0:
-                variable_combo.addItem(display_value, display_value)
-            line.setText(display_value)
+            value_input.select_variable(new_value)
 
-        create_button.clicked.connect(on_create_variable)
-
-        row_widget = QWidget()
-        row_layout = QVBoxLayout(row_widget)
-        row_layout.setContentsMargins(0, 0, 0, 0)
-        value_layout = QHBoxLayout()
-        value_layout.setContentsMargins(0, 0, 0, 0)
-        value_layout.addWidget(line, stretch=1)
-        value_layout.addWidget(create_button)
-        row_layout.addLayout(value_layout)
-        row_layout.addWidget(variable_combo)
-        self.param_layout.addRow(self._parameter_label(key), row_widget)
-        if not hasattr(self, "parameter_value_edits"):
-            self.parameter_value_edits = {}
-        self.parameter_value_edits[(block.block_id, key)] = line
-        if not hasattr(self, "parameter_variable_combos"):
-            self.parameter_variable_combos = {}
-        self.parameter_variable_combos[(block.block_id, key)] = variable_combo
-
-    @staticmethod
-    def _sync_variable_picker(variable_combo, value):
-        index = variable_combo.findText(str(value), Qt.MatchExactly)
-        if index < 1:
-            index = 0
-        if variable_combo.currentIndex() == index:
-            return
-        variable_combo.blockSignals(True)
-        variable_combo.setCurrentIndex(index)
-        variable_combo.blockSignals(False)
+        value_input.createVariableRequested.connect(on_create_variable)
+        return value_input
 
     def _add_search_ocr_query_row(self, block, default):
-        query_edit = QLineEdit(str(block.params.get("query", default) or ""))
-        query_edit.setPlaceholderText(t("function.ocr_query_text"))
-        query_edit.setEnabled(self.is_editable())
-        query_edit.textChanged.connect(
-            lambda text: block.params.__setitem__("query", text)
+        value_input = self._make_value_input(
+            block.params.get("query", default),
+            lambda text: block.params.__setitem__("query", text),
         )
-
-        variable_combo = SearchableComboBox()
-        variable_combo.addItem(t("function.insert_variable"), "")
-        for variable in self._collect_available_variables():
-            variable_combo.addItem(variable, variable)
-        variable_combo.setCurrentIndex(0)
-        variable_combo.setEnabled(self.is_editable())
-        variable_combo.textActivated.connect(
-            lambda variable: query_edit.setText(variable)
-        )
-
-        query_edit.textChanged.connect(
-            lambda text: self._sync_variable_picker(variable_combo, text)
-        )
-        self._sync_variable_picker(variable_combo, query_edit.text())
-
-        row = QWidget()
-        layout = QVBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(query_edit)
-        layout.addWidget(variable_combo)
-        self.ocr_query_edit = query_edit
-        self.ocr_variable_combo = variable_combo
-        self.param_layout.addRow(self._parameter_label("query"), row)
+        value_input.literal_edit.setPlaceholderText(t("function.ocr_query_text"))
+        self.ocr_value_input = value_input
+        self.ocr_query_edit = value_input.literal_edit
+        self.ocr_variable_combo = value_input.variable_combo
+        self.param_layout.addRow(self._parameter_label("query"), value_input)
 
     def _add_search_region_row(self, block):
         region = block.params.get("region")
@@ -4238,12 +4190,11 @@ class FunctionEditorView(QWidget):
                 if helper_obj.interface.inputs:
                     inputs_dict = block.params.setdefault("inputs", {})
                     for inp in helper_obj.interface.inputs:
-                        inp_line = QLineEdit(str(inputs_dict.get(inp, "")))
-                        inp_line.setPlaceholderText(f"${inp}")
-                        inp_line.textChanged.connect(
+                        value_input = self._make_value_input(
+                            inputs_dict.get(inp, ""),
                             lambda text, key=inp: inputs_dict.__setitem__(key, text.strip())
                         )
-                        self.param_layout.addRow(f"{inp}:", inp_line)
+                        self.param_layout.addRow(f"{inp}:", value_input)
 
     def _refresh_call_function_details(self, block):
         if not self.current_function or block not in self.current_function.blocks:

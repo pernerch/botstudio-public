@@ -77,6 +77,7 @@ class ReleasePackagingTests(unittest.TestCase):
                         self.assertTrue(report["main_window_created"])
                         self.assertTrue(report["package_roundtrip"])
                         self.assertTrue(report["markdown_editor"])
+                        self.assertTrue(report["exclusive_variable_inputs"])
                         if sys.platform == "win32":
                             self.assertEqual("BotStudio.Studio", report["taskbar_app_id"])
                     else:

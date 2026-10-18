@@ -19,6 +19,11 @@ class ReleaseNoticesTests(unittest.TestCase):
         self.root = Path(temporary.name)
         self.requirements = self.root / "requirements.txt"
         self.requirements.write_text("# Exact pins\nexample==1.0\n", encoding="utf-8")
+        (self.root / "distribution_materials.json").write_text(json.dumps({
+            "schema_version": 1, "license_files": [],
+            "models": {"distribution": "example", "version": "1.0", "files": []},
+        }), encoding="utf-8")
+        (self.root / "DISTRIBUTION.md").write_text("Synthetic test evidence\n", encoding="utf-8")
         self.license = self.root / "example.dist-info" / "licenses" / "LICENSE"
         self.license.parent.mkdir(parents=True)
         self.license.write_bytes(b"Test notice\n")
@@ -57,15 +62,14 @@ class ReleaseNoticesTests(unittest.TestCase):
         self.assertTrue(all(p["review_required"] for p in report["packages"]))
         self.assertIn("NOT distribution approval", (output / "THIRD_PARTY_NOTICES.txt").read_text())
 
-    def test_missing_wheel_notice_is_reported_not_invented(self):
+    def test_missing_wheel_notice_blocks_collection_instead_of_inventing_text(self):
         self.distribution.files = []
-        _, _, report = self.collect()
-        self.assertIn("example", report["missing_notice_packages"])
-        self.assertEqual([], report["packages"][0]["notice_files"])
+        with self.assertRaisesRegex(ValueError, "Missing third-party license texts: example"):
+            self.collect()
 
     def test_version_mismatch_is_explicit(self):
         self.distribution.version = "2.0"
-        with self.assertRaisesRegex(ValueError, "Version mismatch"):
+        with self.assertRaisesRegex(ValueError, "version mismatch"):
             self.collect()
 
     def test_missing_declared_notice_is_explicit(self):

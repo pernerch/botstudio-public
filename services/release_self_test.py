@@ -17,6 +17,7 @@ def _check_package_features(data_root: Path) -> None:
     from services.package_service import PackageService
     from ui.widgets.package_markdown_editor import PackageMarkdownEditor
     from ui.widgets.package_preparation_dialog import PackagePreparationDialog
+    from ui.widgets.variable_value_input import VariableValueInput
 
     root = data_root / "package-self-test"
     function_root = root / "functions"
@@ -69,6 +70,22 @@ def _check_package_features(data_root: Path) -> None:
             raise RuntimeError("Bundled package preparation dialog is missing")
     finally:
         editor.deleteLater()
+    value_input = VariableValueInput(0, ["$Synthetic cooldown"])
+    try:
+        if value_input.value() != "0":
+            raise RuntimeError("Bundled value selector lost a zero literal")
+        value_input.select_variable("Synthetic cooldown")
+        if (
+            value_input.value() != "$Synthetic cooldown"
+            or value_input.literal_edit.text()
+            or value_input.literal_edit.isEnabled()
+        ):
+            raise RuntimeError("Bundled variable selector retained a competing literal")
+        value_input.mode_combo.setCurrentIndex(0)
+        if value_input.value() or value_input.variable_combo.currentText():
+            raise RuntimeError("Bundled value selector retained an inactive reference")
+    finally:
+        value_input.deleteLater()
 
 
 def run_self_test(role: str) -> int:
@@ -163,6 +180,7 @@ def run_self_test(role: str) -> int:
             _check_package_features(data_root)
             report["package_roundtrip"] = True
             report["markdown_editor"] = True
+            report["exclusive_variable_inputs"] = True
         elif role == "watchdog":
             from services.watchdog_autostart_service import WatchdogAutoStartService
             from ui.watchdog_tray import WatchdogTray

@@ -657,6 +657,8 @@
   "function.capture_before_region": "Machen Sie einen Screenshot, bevor Sie eine Region auswählen.",
   "function.ocr_query_text": "Auf dem Bildschirm zu findender Text",
   "function.insert_variable": "Variable einfügen ...",
+  "function.value_mode_literal": "Fester Wert",
+  "function.value_mode_variable": "Variable",
   "function.region_selected": "OCR-Suchbereich ausgewählt.",
   "function.no_live_image": "Kein Live-Bild aufgenommen",
   "function.no_library_preview": "Keine Bibliotheksvorschau verfügbar",

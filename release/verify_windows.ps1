@@ -1,6 +1,7 @@
 param(
     [string]$BundleDirectory,
     [int]$TimeoutSeconds = 90,
+    [string]$ValidationDataRoot,
     [switch]$NativeWindow
 )
 
@@ -65,13 +66,21 @@ $virtualKeyboard = Get-ChildItem -LiteralPath (Join-Path $bundle "_internal\PySi
 if ($virtualKeyboard) {
     throw "Qt Virtual Keyboard must not be distributed in the desktop Studio bundle."
 }
+$unusedNative = Get-ChildItem -LiteralPath (Join-Path $bundle "_internal") -Recurse -File |
+    Where-Object { $_.Name -in @("qpdf.dll", "Qt6Pdf.dll", "opencv_videoio_ffmpeg500_64.dll") }
+if ($unusedNative) {
+    throw "The unused Qt PDF image plugin and OpenCV FFmpeg backend must not be distributed."
+}
 foreach ($forbidden in @("config", "data", "games", "profiles", "logs", "runs", ".venv")) {
     if ((Test-Path -LiteralPath (Join-Path $bundle $forbidden)) -or
         (Test-Path -LiteralPath (Join-Path $bundle "_internal\$forbidden"))) {
         throw "Personal data directory must not be bundled: $forbidden"
     }
 }
-$testRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("botstudio-exe-test-" + [guid]::NewGuid().ToString("N"))
+if ([string]::IsNullOrWhiteSpace($ValidationDataRoot)) {
+    $ValidationDataRoot = Join-Path $root "build\validation"
+}
+$testRoot = Join-Path $ValidationDataRoot ("windows-exe-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
 $oldPlatform = $env:QT_QPA_PLATFORM
 $oldData = $env:BOTSTUDIO_DATA_DIR
@@ -105,6 +114,7 @@ try {
         if ($entry.Role -eq "studio" -and (
             -not $result.application_icon_loaded -or -not $result.taskbar_app_id -or
             -not $result.package_roundtrip -or -not $result.markdown_editor -or
+            -not $result.exclusive_variable_inputs -or
             ($NativeWindow -and (-not $result.native_small_icon -or -not $result.native_large_icon))
         )) {
             throw "Studio self-test did not prove the required taskbar/icon properties."

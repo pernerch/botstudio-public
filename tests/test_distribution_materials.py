@@ -9,9 +9,29 @@ from unittest.mock import patch
 import zipfile
 
 from release.collect_notices import distribution_materials, pinned_packages
+from release.native_distribution import exclude_unused_native_entries
 
 
 PROJECT = Path(__file__).resolve().parents[1]
+
+
+class NativeDistributionTests(unittest.TestCase):
+    def test_filters_only_unused_pdf_and_ffmpeg_binaries(self):
+        entries = [
+            ("PySide6/plugins/imageformats/qpdf.dll", "qpdf.dll", "BINARY"),
+            ("PySide6/Qt6Pdf.dll", "Qt6Pdf.dll", "BINARY"),
+            ("cv2/opencv_videoio_ffmpeg500_64.dll", "ffmpeg.dll", "BINARY"),
+            ("PySide6/plugins/imageformats/qjpeg.dll", "qjpeg.dll", "BINARY"),
+            ("cv2/cv2.pyd", "cv2.pyd", "EXTENSION"),
+        ]
+
+        self.assertEqual(
+            [
+                ("PySide6/plugins/imageformats/qjpeg.dll", "qjpeg.dll", "BINARY"),
+                ("cv2/cv2.pyd", "cv2.pyd", "EXTENSION"),
+            ],
+            exclude_unused_native_entries(entries),
+        )
 
 
 class DistributionMaterialsTests(unittest.TestCase):
