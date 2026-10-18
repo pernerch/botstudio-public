@@ -50,7 +50,7 @@ def native_owner(path: str) -> str:
             "_hashlib.pyd", "_lzma.pyd", "_multiprocessing.pyd", "_overlapped.pyd",
             "_queue.pyd", "_socket.pyd", "_ssl.pyd", "_uuid.pyd", "_wmi.pyd", "_zstd.pyd",
         }
-        or re.fullmatch(r"(?:python3(?:14)?|libcrypto-3|libssl-3|libffi-8)\.dll", relative)
+        or re.fullmatch(r"(?:python3(?:14)?|lib(?:crypto|ssl)-3(?:-x64)?|libffi-8)\.dll", relative)
     ):
         return "cpython"
     raise ValueError(f"Unmapped native distribution file: {path}")

@@ -24,13 +24,17 @@ class NativeDistributionTests(unittest.TestCase):
             "_internal/numpy.libs/libscipy_openblas.dll": "numpy",
             "_internal/PIL/_imaging.pyd": "pillow",
             "_internal/python314.dll": "cpython",
+            "_internal/libcrypto-3.dll": "cpython",
+            "_internal/libcrypto-3-x64.dll": "cpython",
+            "_internal/libssl-3-x64.dll": "cpython",
             "_internal/_ssl.pyd": "cpython",
             "_internal/ucrtbase.dll": "microsoft-runtime",
         }
         for path, owner in cases.items():
             with self.subTest(path=path):
                 self.assertEqual(owner, native_owner(path))
-        for path in ("unexpected.dll", "_internal/unknown.dll", "_internal/unknown.pyd"):
+        for path in ("unexpected.dll", "_internal/unknown.dll", "_internal/unknown.pyd",
+                     "_internal/libcrypto-3-unknown.dll"):
             with self.assertRaisesRegex(ValueError, "Unmapped native"):
                 native_owner(path)
 
