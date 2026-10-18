@@ -1,8 +1,11 @@
 import base64
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
+import shutil
+import subprocess
 import tempfile
 from time import monotonic
 from urllib.parse import quote
@@ -14,6 +17,10 @@ from services.catalog_submission_service import CatalogSubmissionService
 from services.github_auth_service import GitHubAuthError, GitHubPublicationAuthService
 from services.github_catalog_service import GitHubCatalogService
 from services.package_service import PackageError
+
+
+class _BlobInputTooLarge(PackageError):
+    pass
 
 
 class GitHubSubmissionService:
@@ -38,7 +45,24 @@ class GitHubSubmissionService:
                 json=data, timeout=(5, 30), allow_redirects=False, stream=True,
             )
             if response.status_code not in statuses:
-                raise PackageError(f"GitHub submission HTTP {response.status_code}; no automatic retry")
+                if response.status_code == 422 and path.endswith("/git/blobs"):
+                    content = bytearray()
+                    for chunk in response.iter_content(chunk_size=65536):
+                        if monotonic() - started > 45 or len(content) + len(chunk) > 65536:
+                            raise PackageError("GitHub submission error response exceeds size/time limit")
+                        content.extend(chunk)
+                    error = json.loads(content)
+                    if isinstance(error, dict) and error.get("message") == (
+                        "Sorry, your input was too large to process. Consider creating the blob "
+                        "in a local clone of the repository and then pushing it to GitHub."
+                    ):
+                        raise _BlobInputTooLarge(
+                            "GitHub submission HTTP 422: archive exceeds the Git blob API input limit"
+                        )
+                operation = path.split("?")[0].split("/")[-1]
+                raise PackageError(
+                    f"GitHub submission HTTP {response.status_code} during {method} {operation}; no automatic retry"
+                )
             scopes = response.headers.get("X-OAuth-Scopes")
             if not isinstance(scopes, str) or {part.strip() for part in scopes.split(",")} != {"public_repo"}:
                 raise PackageError("GitHub submission requires exactly public_repo permission")
@@ -116,6 +140,78 @@ class GitHubSubmissionService:
         token, _account = self._identity(submission)
         return {"submission": submission, "target": self._target(submission, token)}
 
+    @staticmethod
+    def _push_git_commit(remote, token, target, branch, payloads):
+        git = shutil.which("git")
+        if git is None:
+            raise PackageError(
+                "This archive exceeds GitHub's API upload limit. Install Git for Windows "
+                "and restart Studio to upload it without changing the package."
+            )
+        environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        environment.update({
+            "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_CONFIG_COUNT": "2",
+            "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
+            "GIT_CONFIG_VALUE_0": "Authorization: Basic " + base64.b64encode(
+                ("x-access-token:" + token).encode("utf-8")
+            ).decode("ascii"),
+            "GIT_CONFIG_KEY_1": "http.followRedirects", "GIT_CONFIG_VALUE_1": "false",
+            "GIT_AUTHOR_NAME": "BotStudio", "GIT_AUTHOR_EMAIL": "botstudio@users.noreply.github.com",
+            "GIT_COMMITTER_NAME": "BotStudio", "GIT_COMMITTER_EMAIL": "botstudio@users.noreply.github.com",
+        })
+        started = monotonic()
+        with tempfile.TemporaryDirectory(prefix="botstudio-git-upload-") as temporary:
+            root = Path(temporary)
+            hooks = root / "no-hooks"
+            hooks.mkdir()
+
+            def run(*arguments, data=None):
+                remaining = 180 - (monotonic() - started)
+                if remaining <= 0:
+                    raise PackageError("GitHub Git upload exceeded its 180-second time budget")
+                try:
+                    result = subprocess.run(
+                        [git, "-c", f"core.hooksPath={hooks}", "-c", "gc.auto=0",
+                         "-c", "maintenance.auto=false", *arguments],
+                        cwd=root, env=environment, input=data, stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE, timeout=remaining, check=False,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    )
+                except subprocess.TimeoutExpired:
+                    raise PackageError("GitHub Git upload exceeded its 180-second time budget") from None
+                except OSError:
+                    raise PackageError("Git could not be started for the large package upload") from None
+                if result.returncode:
+                    raise PackageError(
+                        f"GitHub Git upload failed during {arguments[0]}; "
+                        "check network access, Git installation and repository permissions before retrying"
+                    )
+                return result.stdout.decode("utf-8", errors="replace").strip()
+
+            run("init", "--bare", ".")
+            run("fetch", "--depth=1", "--filter=blob:none", "--no-tags", remote, target["base_commit"])
+            run("read-tree", target["base_tree"])
+            for path, payload in payloads:
+                sha = GitHubSubmissionService._sha(run("hash-object", "-w", "--stdin", data=payload))
+                expected = hashlib.sha1(
+                    f"blob {len(payload)}\0".encode("ascii") + payload, usedforsecurity=False,
+                ).hexdigest()
+                if sha != expected:
+                    raise PackageError("Git blob identity does not match the submitted bytes")
+                run("update-index", "--add", "--cacheinfo", f"100644,{sha},{path}")
+            tree = GitHubSubmissionService._sha(run("write-tree"))
+            head = GitHubSubmissionService._sha(run(
+                "commit-tree", tree, "-p", target["base_commit"],
+                data=(
+                    b"Submit BotStudio game package\n\n"
+                    b"Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>\n"
+                ),
+            ))
+            run("push", "--porcelain", remote, f"{head}:refs/heads/{branch}")
+            return head
+
     def submit(self, package_path, *, plan):
         """Revalidate consent before writes; partial GitHub work is never deleted."""
         submission = plan["submission"]
@@ -137,6 +233,7 @@ class GitHubSubmissionService:
             repository_id = target["repository_id"]
             if target["owner_id"] == int(account.account_id):
                 work_id = repository_id
+                remote = f"https://github.com/{GitHubCatalogService.REPOSITORY}.git"
             else:
                 fork_name = "botstudio-catalog-contributions"
                 fork = self._api(
@@ -155,6 +252,7 @@ class GitHubSubmissionService:
                 ):
                     raise PackageError("contribution fork identity is invalid; no files uploaded")
                 work_id = GitHubCatalogService._id(fork.get("id"))
+                remote = f"https://github.com/{account.login}/{fork_name}.git"
             branch = "botstudio-submit-" + uuid4().hex
             try:
                 ref = self._api("POST", f"/repositories/{work_id}/git/refs", token, {
@@ -166,29 +264,33 @@ class GitHubSubmissionService:
                     (submission["archive_path"], snapshot.read_bytes()),
                     (submission["metadata_path"], json.dumps(submission, sort_keys=True, indent=2).encode("utf-8")),
                 )
-                entries = []
-                for path, payload in payloads:
-                    blob = self._api("POST", f"/repositories/{work_id}/git/blobs", token, {
-                        "content": base64.b64encode(payload).decode("ascii"), "encoding": "base64",
+                try:
+                    entries = []
+                    for path, payload in payloads:
+                        blob = self._api("POST", f"/repositories/{work_id}/git/blobs", token, {
+                            "content": base64.b64encode(payload).decode("ascii"), "encoding": "base64",
+                        }, statuses=(201,))
+                        sha = self._sha(blob.get("sha"))
+                        expected = hashlib.sha1(
+                            f"blob {len(payload)}\0".encode("ascii") + payload, usedforsecurity=False,
+                        ).hexdigest()
+                        if sha != expected:
+                            raise PackageError("GitHub blob identity does not match the submitted bytes")
+                        entries.append({"path": path, "mode": "100644", "type": "blob", "sha": sha})
+                    tree = self._api("POST", f"/repositories/{work_id}/git/trees", token, {
+                        "base_tree": target["base_tree"], "tree": entries,
                     }, statuses=(201,))
-                    sha = self._sha(blob.get("sha"))
-                    expected = hashlib.sha1(
-                        f"blob {len(payload)}\0".encode("ascii") + payload, usedforsecurity=False,
-                    ).hexdigest()
-                    if sha != expected:
-                        raise PackageError("GitHub blob identity does not match the submitted bytes")
-                    entries.append({"path": path, "mode": "100644", "type": "blob", "sha": sha})
-                tree = self._api("POST", f"/repositories/{work_id}/git/trees", token, {
-                    "base_tree": target["base_tree"], "tree": entries,
-                }, statuses=(201,))
-                commit = self._api("POST", f"/repositories/{work_id}/git/commits", token, {
-                    "message": "Submit BotStudio game package",
-                    "tree": self._sha(tree.get("sha")), "parents": [target["base_commit"]],
-                }, statuses=(201,))
-                head = self._sha(commit.get("sha"))
-                ref = self._api("PATCH", f"/repositories/{work_id}/git/refs/heads/{branch}", token, {
-                    "sha": head, "force": False,
-                })
+                    commit = self._api("POST", f"/repositories/{work_id}/git/commits", token, {
+                        "message": "Submit BotStudio game package",
+                        "tree": self._sha(tree.get("sha")), "parents": [target["base_commit"]],
+                    }, statuses=(201,))
+                    head = self._sha(commit.get("sha"))
+                    ref = self._api("PATCH", f"/repositories/{work_id}/git/refs/heads/{branch}", token, {
+                        "sha": head, "force": False,
+                    })
+                except _BlobInputTooLarge:
+                    head = self._push_git_commit(remote, token, target, branch, payloads)
+                    ref = self._api("GET", f"/repositories/{work_id}/git/ref/heads/{branch}", token)
                 if self._sha(self._object(ref, "object").get("sha")) != head:
                     raise PackageError("updated submission branch identity does not match")
                 if self._target(submission, token) != target:

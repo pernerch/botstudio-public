@@ -70,6 +70,59 @@ class GitHubCatalogTests(unittest.TestCase):
         for response in responses:
             response.close.assert_called_once_with()
 
+    def test_publication_comparison_reads_pages_and_downloads_only_latest_own_game_channels(self):
+        owner = GitHubAccount("123", "owner")
+
+        def entry(asset, version, game="game", publisher=owner):
+            return {
+                "asset_id": asset, "size": 10, "package": {
+                    "package_id": "example", "game_id": game,
+                    "publisher": publisher, "version": version,
+                },
+            }
+
+        latest = entry(2, "1.0.10")
+        self.service.load = Mock(side_effect=[
+            {"repository": self.service.REPOSITORY, "repository_id": 1, "next_page": 2,
+             "entries": [entry(1, "1.0.9"), entry(3, "1.0.20", game="other")]},
+            {"repository": self.service.REPOSITORY, "repository_id": 1, "next_page": None,
+             "entries": [latest, entry(4, "2.0.0", publisher=GitHubAccount("456", "other"))]},
+        ])
+        self.service.download_preview = Mock(return_value={
+            "manifest": {"package_name": "Example", "package_type": "function"},
+        })
+        packages = Mock(archive_content_fingerprint=Mock(return_value="fingerprint"))
+        result = self.service.published_content("game", owner, packages)
+        self.assertEqual({"fingerprint": ("Example", "function")}, result)
+        self.assertEqual([{"page": 1}, {"page": 2}], [
+            call.kwargs for call in self.service.load.call_args_list
+        ])
+        self.service.download_preview.assert_called_once()
+        self.assertEqual(latest, self.service.download_preview.call_args.args[1])
+        self.assertFalse(self.service.download_preview.call_args.args[2].parent.exists())
+
+    def test_publication_comparison_fails_visibly_on_incomplete_catalog_or_download(self):
+        owner = GitHubAccount("123", "owner")
+        packages = Mock()
+        self.service.load = Mock(return_value={
+            "repository": self.service.REPOSITORY, "repository_id": 1,
+            "next_page": 2, "entries": [],
+        })
+        with self.assertRaisesRegex(PackageError, "10 catalog pages"):
+            self.service.published_content("game", owner, packages)
+        self.assertEqual(10, self.service.load.call_count)
+        self.service.load = Mock(return_value={
+            "repository": self.service.REPOSITORY, "repository_id": 1, "next_page": None,
+            "entries": [{"asset_id": 1, "size": 10, "package": {
+                "package_id": "example", "game_id": "game", "publisher": owner,
+                "version": "1.0.0",
+            }}],
+        })
+        self.service.download_preview = Mock(side_effect=PackageError("SHA-256 does not match"))
+        with self.assertRaisesRegex(PackageError, "SHA-256"):
+            self.service.published_content("game", owner, packages)
+        packages.archive_content_fingerprint.assert_not_called()
+
     def test_drafts_are_excluded_prereleases_are_explicit_and_empty_is_valid(self):
         draft = {**self.release, "draft": True}
         self.respond([draft, {**self.release, "prerelease": True}])
@@ -237,6 +290,67 @@ class GitHubCatalogTests(unittest.TestCase):
         self.assertEqual("game", result["entries"][0]["package"]["game_id"])
         self.assertEqual(2, self.request.call_count)
         self.assertIsNone(result["next_page"])
+
+    def test_readable_markdown_release_retains_verified_embedded_descriptor(self):
+        release, descriptor = self.structured_release()
+        publication = {
+            **json.loads(release["body"]), "submission": descriptor,
+            "display": {
+                "package_name": "Journey of Light", "game_name": "Whiteout Survival",
+                "package_type": "event", "author": "@publisher",
+                "description": "Mission notes", "contents": {"functions": 5},
+            },
+        }
+        release["body"] = (
+            "**Journey of Light**\n\nDescription\n\n"
+            "<!-- botstudio-publication-v1\n" + json.dumps(publication) + "\n-->"
+        )
+        self.respond([release])
+        result = self.service.load()
+        self.assertEqual("game", result["entries"][0]["package"]["game_id"])
+        self.assertEqual("Journey of Light", result["entries"][0]["package"]["package_name"])
+        self.assertEqual("event", result["entries"][0]["package"]["package_type"])
+        self.assertEqual(2, self.request.call_count)
+
+    def test_windows_line_endings_preserve_structured_publication_metadata(self):
+        release, descriptor = self.structured_release()
+        publication = {**json.loads(release["body"]), "submission": descriptor}
+        release["body"] = (
+            "Description\r\n\r\n<!-- botstudio-publication-v1\r\n"
+            + json.dumps(publication) + "\r\n-->"
+        )
+        self.respond([release])
+        result = self.service.load()
+        self.assertEqual(descriptor["package_id"], result["entries"][0]["package"]["package_id"])
+
+    def test_malformed_marked_release_never_falls_back_to_unstructured_catalog(self):
+        for metadata in ("not json\n-->", "{}\n-->", "{}",
+                         "{}\n-->\n<!-- botstudio-publication-v1\n{}\n-->"):
+            with self.subTest(metadata=metadata):
+                release, _ = self.structured_release()
+                release["body"] = "Description\n<!-- botstudio-publication-v1\n" + metadata
+                self.respond([release])
+                with self.assertRaises(PackageError):
+                    self.service.load()
+                self.request.reset_mock()
+
+    def test_invalid_display_metadata_fails_without_unknown_type_fallback(self):
+        for changes in ({"package_type": "unknown"}, {"contents": {"functions": True}},
+                        {"package_name": ""}, {"author": []}):
+            with self.subTest(changes=changes):
+                release, descriptor = self.structured_release()
+                display = {
+                    "package_name": "Journey", "game_name": "Game",
+                    "package_type": "event", "author": "@publisher",
+                    "description": "", "contents": {"functions": 1}, **changes,
+                }
+                release["body"] = json.dumps({
+                    **json.loads(release["body"]), "submission": descriptor, "display": display,
+                })
+                self.respond([release])
+                with self.assertRaises(PackageError):
+                    self.service.load()
+                self.request.reset_mock()
 
     def test_invalid_embedded_descriptor_fails_without_legacy_fallback(self):
         for change in (

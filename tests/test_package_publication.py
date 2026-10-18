@@ -122,6 +122,53 @@ class PackagePublicationTests(unittest.TestCase):
         self.assertEqual(self.owner, self.b.load_saved_function("game", "function").creator_account)
         self.b.inspect_package(str(updated_archive))
 
+    def test_same_account_roundtrip_version_bump_is_not_new_publication_content(self):
+        archive, _ = self.archive(self.a, self.function, self.owner, "unchanged-a")
+        published = self.a.archive_content_fingerprint(archive)
+        imported = self.install_on_b(archive)
+        imported.bump_revision("No code changes", account=self.owner)
+        self.save(self.b, imported)
+        preview = self.b.preview_function_package(
+            imported, profile_id="", publication_account=self.owner,
+        )
+        self.assertEqual(published, preview["content_fingerprint"])
+        imported.description = "Changed instructions"
+        self.save(self.b, imported)
+        changed = self.b.preview_function_package(
+            imported, profile_id="", publication_account=self.owner,
+        )
+        self.assertNotEqual(published, changed["content_fingerprint"])
+
+    def test_signed_in_account_and_license_do_not_replace_missing_creator_attribution(self):
+        self.function.creator_account = None
+        self.save(self.a, self.function)
+        with self.assertRaisesRegex(PackageError, "Missing creator attribution for: Example"):
+            self.a.preview_function_package(
+                self.function, profile_id="", publication_account=self.owner,
+            )
+        self.assertIsNone(self.a.load_saved_function("game", "function").creator_account)
+        self.assertIsNotNone(self.licenses.get_license(self.owner.account_id))
+
+    def test_attribution_action_makes_own_existing_function_ready(self):
+        self.function.creator_account = None
+        self.save(self.a, self.function)
+        self.a.preparation_service.attribute_functions(
+            [("game", "function")], self.owner,
+        )
+        attributed = self.a.load_saved_function("game", "function")
+        preview = self.a.preview_function_package(
+            attributed, profile_id="", publication_account=self.owner,
+        )
+        self.assertEqual(self.owner.to_dict(), preview["manifest"]["package_metadata"]["publisher"])
+
+    def test_missing_creator_license_reports_account_instead_of_sign_in(self):
+        self.function.creator_account = GitHubAccount("789", "another")
+        self.save(self.a, self.function)
+        with self.assertRaisesRegex(PackageError, "No package license is selected for creator @another"):
+            self.a.preview_function_package(
+                self.function, profile_id="", publication_account=self.owner,
+            )
+
     def test_second_account_creates_explicit_variant_without_replacing_creator(self):
         archive, original = self.archive(self.a, self.function, self.owner, "a")
         imported = self.install_on_b(archive)

@@ -202,11 +202,26 @@ class GitHubCatalogService:
         body = release.get("body")
         if not body:
             return None
+        if isinstance(body, str):
+            body = body.replace("\r\n", "\n")
+        marker = "<!-- botstudio-publication-v1\n"
+        marked = isinstance(body, str) and marker in body
+        if marked:
+            if body.count(marker) != 1:
+                raise PackageError("GitHub catalog contains multiple publication metadata blocks")
+            _, _, metadata = body.partition(marker)
+            body, separator, remaining = metadata.partition("\n-->")
+            if not separator or remaining.strip():
+                raise PackageError("GitHub catalog contains malformed publication metadata")
         try:
             publication = json.loads(body)
         except (TypeError, json.JSONDecodeError):
+            if marked:
+                raise PackageError("GitHub catalog contains invalid publication metadata") from None
             return None
         if not isinstance(publication, dict) or publication.get("schema_version") != 1:
+            if marked:
+                raise PackageError("GitHub catalog contains unsupported publication metadata")
             return None
         try:
             if type(publication["schema_version"]) is not int:
@@ -275,10 +290,29 @@ class GitHubCatalogService:
                 }
             ):
                 raise ValueError("submission does not match release")
-            return {
+            details = {
                 "game_id": game, "package_id": package, "version": version,
                 "publisher": publisher,
             }
+            if "display" in publication:
+                display = publication["display"]
+                if not isinstance(display, dict) or set(display) != {
+                    "package_name", "game_name", "package_type", "description", "contents", "author",
+                }:
+                    raise ValueError("invalid package display metadata")
+                for field in ("package_name", "game_name", "author"):
+                    self._text(display[field], 10000)
+                if display["package_type"] not in ("event", "function", "helper"):
+                    raise ValueError("invalid package type")
+                if not isinstance(display["description"], str) or len(display["description"]) > 120000:
+                    raise ValueError("invalid package description")
+                if not isinstance(display["contents"], dict) or not all(
+                    isinstance(key, str) and type(value) is int and value >= 0
+                    for key, value in display["contents"].items()
+                ):
+                    raise ValueError("invalid package contents")
+                details.update(display)
+            return details
         except (KeyError, TypeError, ValueError, AttributeError, binascii.Error):
             raise PackageError("GitHub catalog publication metadata is invalid") from None
 
@@ -294,6 +328,53 @@ class GitHubCatalogService:
             ]
         ):
             raise PackageError("GitHub catalog changed; reload and select the package again")
+
+    def published_content(self, game_id, account, packages):
+        """Fresh, bounded comparison against the account's latest public channels."""
+        from services.managed_package_service import ManagedPackageService
+
+        started = monotonic()
+        latest = {}
+        catalog = None
+        for page in range(1, 11):
+            if monotonic() - started > 120:
+                raise PackageError("GitHub publication comparison exceeded its time budget")
+            current = self.load(page=page)
+            if catalog is not None and current["repository_id"] != catalog["repository_id"]:
+                raise PackageError("GitHub catalog changed during publication comparison")
+            catalog = current
+            for entry in current["entries"]:
+                details = entry.get("package")
+                if (
+                    not details or details["game_id"] != game_id
+                    or details["publisher"].account_id != account.account_id
+                ):
+                    continue
+                key = details["package_id"]
+                version = tuple(int(part) for part in details["version"].split("."))
+                if key not in latest or version > latest[key][0]:
+                    latest[key] = (version, entry)
+            if current["next_page"] is None:
+                break
+        else:
+            raise PackageError("GitHub publication comparison exceeds 10 catalog pages")
+        entries = [item[1] for item in latest.values()]
+        if len(entries) > 30 or sum(entry["size"] for entry in entries) > self.MAX_DOWNLOAD_BYTES:
+            raise PackageError("GitHub publication comparison exceeds its package download budget")
+        fingerprints = {}
+        with tempfile.TemporaryDirectory(prefix="botstudio-published-content-") as temporary:
+            managed = ManagedPackageService(Path(temporary) / "managed", packages)
+            snapshot = {**catalog, "entries": entries}
+            for index, entry in enumerate(entries):
+                if monotonic() - started > 120:
+                    raise PackageError("GitHub publication comparison exceeded its time budget")
+                archive = Path(temporary) / f"{index}.botstudio.zip"
+                preview = self.download_preview(snapshot, entry, archive, managed)
+                manifest = preview["manifest"]
+                fingerprints[packages.archive_content_fingerprint(archive)] = (
+                    manifest["package_name"], manifest["package_type"],
+                )
+        return fingerprints
 
     def check_archive_limits(self, archive_path):
         try:
@@ -368,6 +449,18 @@ class GitHubCatalogService:
                     or metadata.get("publisher") != details["publisher"].to_dict()
                 ):
                     raise PackageError("downloaded package does not match catalog grouping")
+                if "package_name" in details:
+                    kind = manifest.get("package_type")
+                    if kind == "function" and metadata["package_id"].startswith("helper-"):
+                        kind = "helper"
+                    display = {
+                        "package_name": manifest["package_name"],
+                        "game_name": manifest["game"].get("name") or manifest["game"]["id"],
+                        "package_type": kind, "description": manifest["description"],
+                        "contents": manifest["contents"], "author": metadata["author"],
+                    }
+                    if any(details[key] != value for key, value in display.items()):
+                        raise PackageError("downloaded package does not match catalog display metadata")
             self._current_entry(catalog, entry)
             source = self.validate_source({
                 "repository": catalog["repository"],

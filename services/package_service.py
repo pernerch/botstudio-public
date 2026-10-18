@@ -9,10 +9,11 @@ import tempfile
 import zipfile
 from copy import deepcopy
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from models.bot_function import BotFunction, FunctionPackageOrigin
 from models.github_account import GitHubAccount
+from scheduler.models import PROTECTED_TASK_KINDS
 from services.game_service import GameService
 from services.library_service import LibraryService
 from services.package_license_service import PackagePreparationService
@@ -26,6 +27,7 @@ MAX_PUBLISH_ARCHIVE_BYTES = 100 * 1024 * 1024
 MAX_PACKAGE_IMAGES = 20
 MAX_PACKAGE_IMAGE_BYTES = 20 * 1024 * 1024
 PACKAGE_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+PackageFiles = dict[str, Path | bytes]
 
 
 class PackageError(ValueError):
@@ -82,6 +84,58 @@ class PackageService:
         return function
 
     @staticmethod
+    def _event_is_exportable(event) -> bool:
+        return not (
+            event.is_init or event.is_interrupt
+            or any(task.protected or task.kind in PROTECTED_TASK_KINDS for task in event.tasks)
+        )
+
+    @staticmethod
+    def _portable_event_content(payload):
+        payload = deepcopy(payload)
+        runtime_fields = {
+            "last_started_at", "last_finished_at", "duration_samples_seconds",
+            "last_executed", "next_due_at", "status", "used", "used_by",
+        }
+        local_settings = {
+            "enabled", "priority", "sort_order", "schedule_mode", "interval_seconds",
+            "run_at_local", "cooldown_seconds", "retry_minutes",
+        }
+        for key in runtime_fields | local_settings | {"event_id", "profile_id"}:
+            payload.pop(key, None)
+        for task in payload["tasks"]:
+            for key in runtime_fields | {"task_id", "name", "enabled", "priority", "sort_order"}:
+                task.pop(key, None)
+        return payload
+
+    @staticmethod
+    def preparation_event_sources(events) -> list[tuple[str, str, str, str]]:
+        """Group portable content, not profile ownership or execution history."""
+        unique = {}
+        for event in sorted(events, key=lambda item: item.event_id):
+            if not PackageService._event_is_exportable(event):
+                continue
+            if not any(task.function_ids for task in event.tasks):
+                continue
+            payload = PackageService._portable_event_content(event.to_dict())
+            identity = json.dumps(payload, sort_keys=True, ensure_ascii=True)
+            unique.setdefault(identity, event)
+        names = {}
+        for event in unique.values():
+            name = event.name or event.event_id
+            names[name] = names.get(name, 0) + 1
+        return [
+            (
+                event.event_id,
+                (event.name or event.event_id)
+                + (f" [{event.event_id}]" if names[event.name or event.event_id] > 1 else ""),
+                event.name,
+                "",
+            )
+            for event in unique.values()
+        ]
+
+    @staticmethod
     def _validate_path_component(value: str, label: str) -> None:
         if (
             not value
@@ -130,7 +184,7 @@ class PackageService:
                 json.dumps(manifest["checksums"], indent=2, ensure_ascii=False),
             )
             for archive_name, source in files.items():
-                archive.write(source, archive_name)
+                self._write_archive_member(archive, archive_name, source)
         return output
 
     def preview_function_package(
@@ -181,7 +235,7 @@ class PackageService:
         package_assets: dict[str, Path] | None = None,
         publication_account: GitHubAccount | None = None,
         package_version: str | None = None,
-    ) -> tuple[dict, dict[str, Path]]:
+    ) -> tuple[dict, PackageFiles]:
         if not function or not function.saved:
             raise PackageError("only saved Functions can be exported")
         if not function.game_id:
@@ -207,24 +261,8 @@ class PackageService:
             )
         self._validate_package_metadata(package_metadata)
 
-        files: dict[str, Path] = {}
-        for item in functions:
-            files[
-                f"content/functions/{item.game_id}/{item.function_id}.json"
-            ] = self.function_root / item.game_id / f"{item.function_id}.json"
-
-        library_ids = []
-        for item in functions:
-            for entry_id in item.collect_library_entries():
-                if entry_id not in library_ids:
-                    library_ids.append(entry_id)
-        for entry_id in library_ids:
-            entry_root = self.library_service.root / entry_id
-            if not entry_root.exists():
-                raise PackageError(f"missing Library entry: {entry_id}")
-            for path in entry_root.rglob("*"):
-                if path.is_file():
-                    files[f"content/library/{entry_id}/{path.relative_to(entry_root).as_posix()}"] = path
+        files = self._function_files(functions)
+        library_ids = {entry_id for item in functions for entry_id in item.collect_library_entries()}
 
         variable_file = self.variable_service.root / function.game_id / "variables.json"
         if variable_file.exists():
@@ -346,9 +384,14 @@ class PackageService:
         package_assets: dict[str, Path] | None = None,
         publication_account: GitHubAccount | None = None,
         package_version: str | None = None,
-    ) -> tuple[dict, dict[str, Path], list[Path]]:
+    ) -> tuple[dict, PackageFiles, list[Path]]:
         if not event or not event.game_id:
             raise PackageError("Event game is required")
+        if not self._event_is_exportable(event):
+            raise PackageError(
+                "system Init/Interrupt Events and protected Tasks cannot be exported; "
+                "export their Functions separately"
+            )
         self._validate_package_metadata(package_metadata)
         functions = []
         all_event_functions_resolved = True
@@ -498,9 +541,34 @@ class PackageService:
                 raise PackageError("select your account's package license before publication")
             details = prepared
         else:
-            raise PackageError(
-                "package sources require creator attribution and a license before publication"
-            )
+            unattributed = [
+                function.name or function.function_id
+                for function in functions if function.creator_account is None
+            ]
+            if unattributed:
+                raise PackageError(
+                    "Missing creator attribution for: " + ", ".join(unattributed)
+                    + ". GitHub sign-in and the default package license do not attribute "
+                    "existing Functions. Under GitHub account, use "
+                    "'Select existing Functions to attribute...' for your own local "
+                    "Functions, including referenced Helpers, then refresh the package preview. "
+                    "Existing creators and imported content must not be reassigned."
+                )
+            creators = {function.creator_account for function in functions}
+            if len(creators) > 1:
+                raise PackageError(
+                    "The package contains Functions from multiple creator accounts without "
+                    "preserved source-package license metadata. A default account license "
+                    "does not establish permission to relicense these Functions."
+                )
+            if creators:
+                creator = next(iter(creators))
+                raise PackageError(
+                    f"No package license is selected for creator @{creator.login}. "
+                    "The selected default license applies only to its GitHub account; "
+                    "choose that creator account's package license before publication."
+                )
+            raise PackageError("The Event contains no Functions to prepare for publication.")
         self._validate_package_metadata(details)
         previous_publisher = details["publisher"]
         same_account = self.publisher_identity_key(previous_publisher) == f"github:{account.account_id}"
@@ -852,10 +920,13 @@ class PackageService:
         return f"github:{account_id}"
 
     @staticmethod
-    def _checksums(files: dict[str, Path]) -> dict[str, str]:
+    def _checksums(files: PackageFiles) -> dict[str, str]:
         result = {}
         for archive_name, source in files.items():
             digest = hashlib.sha256()
+            if isinstance(source, bytes):
+                result[archive_name] = hashlib.sha256(source).hexdigest()
+                continue
             with open(source, "rb") as handle:
                 for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                     digest.update(chunk)
@@ -864,7 +935,7 @@ class PackageService:
 
     @staticmethod
     def _add_package_assets(
-        files: dict[str, Path],
+        files: PackageFiles,
         package_assets: dict[str, Path] | None,
     ) -> None:
         if package_assets is None:
@@ -904,7 +975,7 @@ class PackageService:
         package_name: str,
         description: str,
         function_count: int,
-        files: dict[str, Path],
+        files: PackageFiles,
         profile_id: str | None,
     ) -> dict:
         game = self.game_service.get_game(game_id) or {}
@@ -929,17 +1000,114 @@ class PackageService:
             },
         }
 
-    def _function_files(self, functions: list[BotFunction]) -> dict[str, Path]:
-        files = {}
+    def _function_files(self, functions: list[BotFunction]) -> PackageFiles:
+        files: PackageFiles = {}
         for function in functions:
             files[
                 f"content/functions/{function.game_id}/{function.function_id}.json"
             ] = self.function_root / function.game_id / f"{function.function_id}.json"
+        library_ids = sorted({entry_id for function in functions for entry_id in function.collect_library_entries()})
+        for entry_id in library_ids:
+            self._validate_path_component(entry_id, "Library")
+            entry_root = self.library_service.root / entry_id
+            if entry_root.is_symlink():
+                raise PackageError(f"Library entries cannot be symbolic links: {entry_id}")
+            if not entry_root.is_dir():
+                raise PackageError(f"missing Library entry: {entry_id}")
+            for path in sorted(entry_root.rglob("*")):
+                if path.is_symlink():
+                    raise PackageError(f"Library assets cannot be symbolic links: {entry_id}")
+                if path.is_file():
+                    files[f"content/library/{entry_id}/{path.relative_to(entry_root).as_posix()}"] = path
+        overrides, removed = self._portable_library_files(files, lambda name: self._file_bytes(files[name]))
+        for name in removed:
+            del files[name]
+        files.update(overrides)
         return files
+
+    @staticmethod
+    def _file_bytes(source: Path | bytes) -> bytes:
+        return source if isinstance(source, bytes) else source.read_bytes()
+
+    @staticmethod
+    def _write_archive_member(archive, name: str, source: Path | bytes) -> None:
+        if isinstance(source, bytes):
+            archive.writestr(name, source)
+        else:
+            archive.write(source, name)
+
+    @staticmethod
+    def _portable_library_files(names, read) -> tuple[dict[str, bytes], set[str]]:
+        """Preserve every sample while sharing byte-identical source images per entry."""
+        names = set(names)
+        overrides = {}
+        removed = set()
+        for name in sorted(names):
+            if not name.startswith("content/library/") or not name.endswith("/entry.json"):
+                continue
+            root = name.rsplit("/", 1)[0]
+            entry_id = root.split("/")[-1]
+            try:
+                entry = json.loads(read(name))
+                if not isinstance(entry, dict):
+                    raise ValueError("Library entry must be an object")
+
+                def resolve(value):
+                    if not isinstance(value, str) or not value:
+                        raise ValueError("missing Library asset path")
+                    parts = PureWindowsPath(value).parts
+                    if ".." in parts:
+                        raise ValueError("unsafe Library asset path")
+                    indices = [index for index, part in enumerate(parts) if part == entry_id]
+                    if indices:
+                        relative = parts[indices[-1] + 1:]
+                    elif len(parts) == 1:
+                        relative = parts
+                    else:
+                        raise ValueError("Library asset belongs to another entry")
+                    target = root + "/" + "/".join(relative)
+                    if not relative or target not in names:
+                        raise ValueError("missing Library asset")
+                    return target
+
+                samples = []
+                for field in ("accepted_samples", "rejected_samples"):
+                    values = entry.get(field, [])
+                    if not isinstance(values, list) or any(not isinstance(sample, dict) for sample in values):
+                        raise ValueError("invalid Library samples")
+                    samples.extend(values)
+                sources = sorted({resolve(sample["source"]) for sample in samples if sample.get("source")})
+                groups: dict[str, list[str]] = {}
+                replacements = {}
+                for source in sources:
+                    raw = read(source)
+                    digest = hashlib.sha256(raw).hexdigest()
+                    candidates = groups.setdefault(digest, [])
+                    canonical = next((candidate for candidate in candidates if read(candidate) == raw), None)
+                    if canonical is None:
+                        candidates.append(source)
+                    else:
+                        replacements[source] = canonical
+                        removed.add(source)
+                pattern = entry.get("pattern", {})
+                if not isinstance(pattern, dict):
+                    raise ValueError("invalid Library pattern")
+                if pattern.get("reference_path"):
+                    target = resolve(pattern["reference_path"])
+                    pattern["reference_path"] = replacements.get(target, target).removeprefix("content/library/")
+                for sample in samples:
+                    for key in ("source", "crop", "match"):
+                        if sample.get(key):
+                            target = resolve(sample[key])
+                            sample[key] = replacements.get(target, target).removeprefix("content/library/")
+                overrides[name] = json.dumps(entry, sort_keys=True, ensure_ascii=True).encode()
+            except (ValueError, KeyError, TypeError, AttributeError) as error:
+                raise PackageError(f"invalid Library package entry {entry_id}: {error}") from error
+        return overrides, removed
 
     def _add_variable_files(
         self,
-        files: dict[str, Path],
+        files: PackageFiles,
         game_id: str,
         profile_id: str | None,
     ) -> None:
@@ -960,7 +1128,7 @@ class PackageService:
         return temporary
 
     @staticmethod
-    def _write_package(output: Path, manifest: dict, files: dict[str, Path]) -> None:
+    def _write_package(output: Path, manifest: dict, files: PackageFiles) -> None:
         output.parent.mkdir(parents=True, exist_ok=True)
         checksums = PackageService._checksums(files)
         manifest["checksums"] = checksums
@@ -969,10 +1137,10 @@ class PackageService:
                 archive.writestr("manifest.json", json.dumps(manifest, indent=2, ensure_ascii=False))
                 archive.writestr("checksums.json", json.dumps(checksums, indent=2, ensure_ascii=False))
                 for archive_name, source in files.items():
-                    archive.write(source, archive_name)
+                    PackageService._write_archive_member(archive, archive_name, source)
         finally:
             for source in files.values():
-                if source.name.endswith(".json") and source.parent == Path(tempfile.gettempdir()):
+                if isinstance(source, Path) and source.name.endswith(".json") and source.parent == Path(tempfile.gettempdir()):
                     source.unlink(missing_ok=True)
 
     @staticmethod
@@ -981,18 +1149,74 @@ class PackageService:
             path.unlink(missing_ok=True)
 
     @staticmethod
-    def _package_preview(manifest: dict, files: dict[str, Path]) -> dict:
+    def _package_preview(manifest: dict, files: PackageFiles) -> dict:
         return {
             "manifest": manifest,
             "checksums": dict(manifest["checksums"]),
             "files": tuple(sorted(files)),
+            "content_fingerprint": PackageService._content_fingerprint(
+                manifest, files, lambda name: PackageService._file_bytes(files[name]),
+            ),
         }
+
+    @staticmethod
+    def _content_fingerprint(manifest, names, read):
+        """Compare shareable content, not archive timestamps or version counters."""
+        metadata = deepcopy(manifest.get("package_metadata") or {})
+        for key in ("package_id", "package_version", "rights_confirmed"):
+            metadata.pop(key, None)
+        content = []
+        names = set(names)
+
+        def verified_read(name):
+            raw = read(name)
+            if hashlib.sha256(raw).hexdigest() != manifest["checksums"][name]:
+                raise PackageError("package content changed during publication comparison")
+            return raw
+
+        overrides, removed = PackageService._portable_library_files(names, verified_read)
+        for name in sorted(names - removed):
+            raw = overrides[name] if name in overrides else verified_read(name)
+            canonical_name = name
+            if name.startswith("content/functions/") and name.endswith(".json"):
+                data = json.loads(raw)
+                for key in (
+                    "created_at", "revision", "revised_at", "history", "package_origins",
+                    "used", "used_by", "schedule", "enabled", "layout_positions",
+                ):
+                    data.pop(key, None)
+                for dependency in data.get("helper_dependencies", []):
+                    dependency.pop("tested_revision", None)
+                raw = json.dumps(data, sort_keys=True, ensure_ascii=True).encode()
+            elif name.startswith("content/scheduler/") and name.endswith(".json"):
+                data = PackageService._portable_event_content(json.loads(raw))
+                canonical_name = f"content/scheduler/{manifest['game']['id']}/event.json"
+                raw = json.dumps(data, sort_keys=True, ensure_ascii=True).encode()
+            elif name.endswith(".json"):
+                raw = json.dumps(json.loads(raw), sort_keys=True, ensure_ascii=True).encode()
+            content.append((canonical_name, hashlib.sha256(raw).hexdigest()))
+        payload = {
+            "package_type": manifest["package_type"], "game": manifest["game"],
+            "package_name": manifest["package_name"], "description": manifest["description"],
+            "metadata": metadata, "content": sorted(content),
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
+
+    def archive_content_fingerprint(self, archive_path) -> str:
+        manifest = self.inspect_package(str(archive_path))
+        try:
+            with zipfile.ZipFile(archive_path) as archive:
+                return self._content_fingerprint(
+                    manifest, manifest["checksums"], archive.read,
+                )
+        except (json.JSONDecodeError, KeyError, TypeError, AttributeError) as error:
+            raise PackageError("invalid package content for publication comparison") from error
 
     def _write_ready_directory(
         self,
         output_directory: str,
         manifest: dict,
-        files: dict[str, Path],
+        files: PackageFiles,
         expected_checksums: dict[str, str] | None,
     ) -> Path:
         if expected_checksums is None or expected_checksums != manifest["checksums"]:
@@ -1024,7 +1248,10 @@ class PackageService:
                     raise PackageError("package contains an unsafe content path")
                 destination = staging.joinpath(*archive_path.parts)
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(source, destination)
+                if isinstance(source, bytes):
+                    destination.write_bytes(source)
+                else:
+                    shutil.copyfile(source, destination)
 
             copied_files = {
                 name: staging.joinpath(*PurePosixPath(name).parts)

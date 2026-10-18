@@ -1061,6 +1061,51 @@ class ManagedPackageTests(unittest.TestCase):
         self.assertEqual(1, dialog.catalog_entries.topLevelItemCount())
         self.assertIn("1 matches among 7", dialog.catalog_scope.text())
 
+    def test_catalog_filters_event_display_name_author_and_contents(self):
+        from models.github_account import GitHubAssetUploader
+        dialog = self.dialog()
+        entry = {
+            "name": "package.botstudio.zip", "tag": "catalog-pr-3-head",
+            "prerelease": False, "release_id": 3, "asset_id": 4, "size": 200,
+            "uploader": GitHubAssetUploader("41898282", "github-actions[bot]"),
+            "package": {
+                "game_id": "whiteout_survival", "game_name": "Whiteout Survival",
+                "package_id": "opaque-stable-id", "package_name": "Journey of Light",
+                "package_type": "event", "version": "1.0.36",
+                "publisher": GitHubAccount("120588088", "pernerch"),
+                "author": "@pernerch", "description": "Run the mission unattended",
+                "contents": {"functions": 12, "library": 4},
+            },
+        }
+        dialog._catalog_loaded({
+            "repository": "pernerch/botstudio-catalog", "repository_id": 10,
+            "entries": [entry], "next_page": None,
+        })
+        dialog.catalog_type.setCurrentIndex(dialog.catalog_type.findData("event"))
+        for query in ("Light", "Journey", "pernerch", "unattended", ""):
+            dialog.catalog_search.setText(query)
+            self.assertEqual(1, dialog.catalog_entries.topLevelItemCount(), query)
+        group = dialog.catalog_entries.topLevelItem(0)
+        self.assertEqual(t("packages.catalog_type_event"), group.text(0))
+        self.assertEqual("Whiteout Survival", group.child(0).text(0))
+        self.assertEqual("Journey of Light", group.child(0).child(0).text(0))
+        details = dialog._catalog_entry_text(entry)
+        self.assertIn("@pernerch", details)
+        self.assertIn("functions: 12", details)
+        self.assertIn("Run the mission unattended", details)
+        dialog.catalog_type.setCurrentIndex(dialog.catalog_type.findData("helper"))
+        self.assertEqual(0, dialog.catalog_entries.topLevelItemCount())
+        variant = {
+            **entry, "release_id": 5, "asset_id": 6,
+            "package": {**entry["package"], "package_id": "different-stable-id"},
+        }
+        dialog.catalog_type.setCurrentIndex(dialog.catalog_type.findData("event"))
+        dialog._catalog_loaded({
+            **dialog.catalog_result, "entries": [entry, variant],
+        })
+        game = dialog.catalog_entries.topLevelItem(0).child(0)
+        self.assertEqual(2, game.childCount())
+
     def test_loading_older_catalog_pages_merges_deduplicates_and_retains_on_error(self):
         from models.github_account import GitHubAssetUploader
         entry = {

@@ -218,6 +218,64 @@ class PackageActivationTests(TestCase):
             self.prepare(status)
         self.assertEqual(before, self.active_snapshot())
 
+    def test_shared_sample_sources_activate_verify_and_reteach(self):
+        def optimize(content):
+            name = "content/library/image/entry.json"
+            entry = json.loads(content[name])
+            entry["accepted_samples"].append(dict(entry["accepted_samples"][0]))
+            entry["accepted_samples"][1]["source"] = entry["accepted_samples"][1]["source"].replace("001_source", "002_source")
+            content["content/library/image/accepted/002_source.png"] = content["content/library/image/accepted/001_source.png"]
+            content[name] = json.dumps(entry).encode()
+            overrides, removed = PackageService._portable_library_files(content, content.__getitem__)
+            for path in removed:
+                del content[path]
+            content.update(overrides)
+
+        status = self.install(mutate=optimize)
+        self.activate(status, self.prepare(status))
+        library = LibraryService(root=self.root / "data/library", reinitialize_service=ReinitializeService())
+        entry = library.load("image")
+        samples = entry["accepted_samples"]
+        self.assertEqual(2, len(samples))
+        self.assertEqual(samples[0]["source"], samples[1]["source"])
+        self.assertTrue(Path(samples[0]["source"]).is_file())
+        self.assertFalse(QImage(samples[0]["source"]).isNull())
+        self.assertFalse((self.root / "data/library/image/accepted/002_source.png").exists())
+
+        import cv2
+        from types import SimpleNamespace
+        from services.learning_reference_service import LearningReferenceService
+        from services.learning_verify_service import LearningVerifyService
+        from services.learning_verify_runner import LearningVerifyRunner
+        from services.learning_teach_service import LearningTeachService
+
+        reference = cv2.imread(entry["pattern"]["reference_path"])
+        fresh = self.root / "fresh-capture.png"
+        fresh.write_bytes(Path(samples[0]["source"]).read_bytes())
+        region = SimpleNamespace(region_id="region", x=0, y=0, width=2, height=2,
+                                 metadata={}, region_type="detection")
+        screen = Mock()
+        screen.capture.return_value = str(fresh)
+        bundle = LearningVerifyRunner(LearningVerifyService(), screen).run(
+            {"id": "technical-local"}, region, region, 2, reference=reference,
+        )
+        self.assertEqual(100, bundle["success_rate"])
+        self.assertEqual(2, screen.capture.call_count)
+        teach = LearningTeachService.__new__(LearningTeachService)
+        teach.library_service = library
+        teach.reference_service = LearningReferenceService()
+        restored = teach.replace(
+            entry_id="image", verify_bundle=bundle, name="Retaught",
+            verify_best=bundle["best"], verify_worst=bundle["worst"],
+            verify_average=bundle["average"], verify_success=bundle["success_rate"],
+        )
+        self.assertEqual("image", restored.entry_id)
+        self.assertEqual(["function"], restored.used_by)
+        self.assertEqual(2, len(restored.accepted_samples))
+        for sample in restored.accepted_samples:
+            for key in ("source", "crop", "match"):
+                self.assertTrue(Path(sample[key]).is_file())
+
     def test_conflicts_fail_before_any_writes(self):
         status = self.install()
         for relative in ("functions/game/function.json", "library/image/entry.json", "scheduler/game/event.json"):

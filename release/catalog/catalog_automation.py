@@ -205,8 +205,63 @@ def validate_pr(api, number, repository_id, *, allow_merged=False):
     return pr, descriptor, raw
 
 
+def package_display(raw):
+    with ZipFile(BytesIO(raw)) as archive:
+        manifest = load_json(archive.read("manifest.json"))
+    name = manifest.get("package_name")
+    description = manifest.get("description")
+    require(isinstance(name, str) and name.strip(), "missing package display name")
+    require(isinstance(description, str), "invalid package description")
+    require("<!-- botstudio-publication-v1" not in description, "description contains reserved metadata marker")
+    game = manifest["game"]
+    game_name = game.get("name") or game["id"]
+    require(isinstance(game_name, str), "invalid Game display name")
+    kind = manifest.get("package_type")
+    if kind == "function" and manifest["package_metadata"]["package_id"].startswith("helper-"):
+        kind = "helper"
+    require(kind in ("event", "function", "helper"), "invalid package display type")
+    contents = manifest["contents"]
+    require(isinstance(contents, dict) and all(
+        isinstance(key, str) and type(value) is int and value >= 0
+        for key, value in contents.items()
+    ), "invalid package contents summary")
+    return {
+        "package_name": name, "game_name": game_name, "package_type": kind,
+        "description": description, "contents": contents,
+        "author": manifest["package_metadata"]["author"],
+    }
+
+
+def release_presentation(raw, publication):
+    display = package_display(raw)
+    name, game_name, description = (
+        display["package_name"], display["game_name"], display["description"]
+    )
+    publication = {**publication, "display": display}
+    title = " ".join(f"{game_name} | {name} {publication['submission']['package_version']}".split())[:200]
+    # JSON escaping prevents user-controlled metadata from closing the HTML comment.
+    metadata = json.dumps(publication, sort_keys=True).replace("<", "\\u003c").replace(">", "\\u003e")
+    body = (
+        description.strip()
+        + "\n\n---\n\n"
+        + f"Package type: **{display['package_type']}** | Author: **{display['author']}**\n\n"
+        + "Contents: " + ", ".join(f"{key}: {value}" for key, value in display["contents"].items())
+        + "\n\n"
+        + "Download **package.botstudio.zip** below and import it in BotStudio.\n\n"
+        + "<!-- botstudio-publication-v1\n" + metadata + "\n-->"
+    )
+    require(len(body.encode("utf-8")) <= 120000, "release description is too large")
+    return title, body
+
+
 def publish(api, number, repository_id):
     pr, descriptor, raw = validate_pr(api, number, repository_id, allow_merged=True)
+    title, body = release_presentation(raw, {
+        "schema_version": 1, "pull_request": number, "head": pr["head"]["sha"],
+        "submitter": descriptor["submitter"], "archive_sha256": descriptor["archive_sha256"],
+        "submission": descriptor,
+        "notice": "PR author/account binding checked; other authorship/license claims remain declared.",
+    })
     root = f"/repositories/{repository_id}"
     if not pr.get("merged"):
         result = api.request("PUT", f"{root}/pulls/{number}/merge", {
@@ -234,13 +289,7 @@ def publish(api, number, repository_id):
     api.request("POST", f"{root}/git/refs", {"ref": f"refs/tags/{tag}", "sha": merged})
     release = api.request("POST", f"{root}/releases", {
         "tag_name": tag, "target_commitish": merged, "draft": True,
-        "name": f"{descriptor['game_id']} | {descriptor['package_id']} {descriptor['package_version']}"[:200],
-        "body": json.dumps({
-            "schema_version": 1, "pull_request": number, "head": pr["head"]["sha"],
-            "submitter": descriptor["submitter"], "archive_sha256": descriptor["archive_sha256"],
-            "submission": descriptor,
-            "notice": "PR author/account binding checked; other authorship/license claims remain declared.",
-        }, sort_keys=True),
+        "name": title, "body": body,
     })
     release_id = release["id"]
     require(type(release_id) is int and release_id > 0, "invalid release ID")

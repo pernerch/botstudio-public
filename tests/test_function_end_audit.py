@@ -98,12 +98,98 @@ def test_canvas_marks_open_ends_and_reports_count():
     assert marked == [(find.block_id, "not_found")]
 
 
+def test_terminal_wires_are_short_marked_stubs_without_changing_connections():
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QApplication
+    from ui.views.function_editor_view import FunctionCanvas
+    from ui.i18n.translator import t
+
+    app = QApplication.instance() or QApplication([])
+    canvas = FunctionCanvas()
+    source = FunctionBlock.create("tap_point")
+    success = FunctionBlock.create(BLOCK_SUCCESS)
+    failure = FunctionBlock.create(BLOCK_FAILURE)
+    normal = FunctionBlock.create("tap_point")
+    canvas._positions = {
+        source.block_id: QPoint(50, 50), success.block_id: QPoint(1200, 700),
+        failure.block_id: QPoint(1500, 900), normal.block_id: QPoint(700, 100),
+    }
+    connections = [
+        FunctionConnection(source.block_id, "ok", success.block_id),
+        FunctionConnection(source.block_id, "failed", failure.block_id),
+        FunctionConnection(source.block_id, "ok", normal.block_id),
+    ]
+    before = [item.to_dict() for item in connections]
+    canvas.draw_blocks([source, success, failure, normal], connections)
+    wires = [item for item in canvas.scene_model.items() if item.data(1) == "wire"]
+    assert sorted(round(item.path().length()) for item in wires)[:2] == [36, 36]
+    assert max(item.path().length() for item in wires) > 400
+    labels = {item.toPlainText() for item in canvas.scene_model.items()
+              if hasattr(item, "toPlainText")}
+    assert {t(f"function.block.{BLOCK_SUCCESS}"), t(f"function.block.{BLOCK_FAILURE}")} <= labels
+    assert all(not text.startswith("function.") for text in labels)
+    assert before == [item.to_dict() for item in connections]
+    assert all(item.data(3).x() == 240 for item in wires)
+    failure.name = "Abort navigation"
+    canvas.draw_blocks([source, success, failure, normal], connections)
+    assert any(item.toPlainText() == "Abort navigation"
+               for item in canvas.scene_model.items() if hasattr(item, "toPlainText"))
+    canvas.close()
+    canvas.deleteLater()
+    app.processEvents()
+
+
+def test_terminal_block_labels_resolve_in_english_and_german():
+    from ui.i18n import translator
+
+    previous = translator.LANG
+    try:
+        for language in ("en", "de"):
+            translator.set_language(language)
+            for block_type in (BLOCK_SUCCESS, BLOCK_FAILURE):
+                label = translator.t(f"function.block.{block_type}")
+                assert not label.startswith("function.")
+                assert label
+    finally:
+        translator.set_language(previous)
+
+
+def test_legacy_terminal_branches_also_render_as_short_stubs():
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QApplication, QGraphicsLineItem
+    from ui.views.function_editor_view import FunctionCanvas
+    from ui.i18n.translator import t
+
+    app = QApplication.instance() or QApplication([])
+    canvas = FunctionCanvas()
+    end = FunctionBlock.create(BLOCK_FAILURE)
+    source = FunctionBlock.create("tap_point", branches={"failed": [end]})
+    canvas._positions = {
+        source.block_id: QPoint(50, 50), end.block_id: QPoint(1200, 700),
+    }
+    canvas.draw_blocks([source, end], [])
+    lines = [item for item in canvas.scene_model.items() if isinstance(item, QGraphicsLineItem)]
+    assert len(lines) == 1
+    assert lines[0].line().length() == 36
+    assert any(item.toPlainText() == t(f"function.block.{BLOCK_FAILURE}")
+               for item in canvas.scene_model.items() if hasattr(item, "toPlainText"))
+    canvas.close()
+    canvas.deleteLater()
+    app.processEvents()
+
+
 def test_editor_one_click_wires_open_end_to_end_block():
+    from unittest.mock import Mock, patch
     from PySide6.QtWidgets import QApplication
     from ui.views.function_editor_view import FunctionEditorView
 
     QApplication.instance() or QApplication([])
-    view = FunctionEditorView()
+    with (
+        patch("ui.views.function_editor_view.ScreenService", return_value=Mock()),
+        patch("services.game_service.EmulatorManager", return_value=Mock(adb_path="unused-adb.exe")),
+        patch("ui.widgets.profile_emulator_bar.EmulatorManager", return_value=Mock(adb_path="unused-adb.exe")),
+    ):
+        view = FunctionEditorView()
     function = _function()
     tap = FunctionBlock.create("tap_point")
     function.blocks.append(tap)
@@ -126,11 +212,17 @@ def test_editor_one_click_wires_open_end_to_end_block():
 
 
 def test_editor_reuses_existing_end_block_unless_new_requested():
+    from unittest.mock import Mock, patch
     from PySide6.QtWidgets import QApplication
     from ui.views.function_editor_view import FunctionEditorView
 
     QApplication.instance() or QApplication([])
-    view = FunctionEditorView()
+    with (
+        patch("ui.views.function_editor_view.ScreenService", return_value=Mock()),
+        patch("services.game_service.EmulatorManager", return_value=Mock(adb_path="unused-adb.exe")),
+        patch("ui.widgets.profile_emulator_bar.EmulatorManager", return_value=Mock(adb_path="unused-adb.exe")),
+    ):
+        view = FunctionEditorView()
     function = _function()
     tap_a = FunctionBlock.create("tap_point")
     tap_b = FunctionBlock.create("tap_point")

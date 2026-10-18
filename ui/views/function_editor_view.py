@@ -1078,33 +1078,43 @@ class FunctionCanvas(QGraphicsView):
                 + 41
                 + int((target_slot_index - (len(target_inputs) - 1) / 2) * 20)
             )
+            terminal = target_block and target_block.block_type in (BLOCK_SUCCESS, BLOCK_FAILURE)
+            wire_end = (
+                QPoint(source_port.x() + 36, source_port.y())
+                if terminal else QPoint(target_position.x(), target_port_y)
+            )
+            path = QPainterPath(source_port)
+            if terminal:
+                path.lineTo(wire_end)
+            else:
+                path = self._wire_path(source_port, wire_end)
 
             line = self.scene_model.addPath(
-                self._wire_path(
-                    source_port,
-                    QPoint(
-                        target_position.x(),
-                        target_port_y,
-                    ),
-                ),
+                path,
                 QPen(color, self.WIRE_WIDTH),
             )
             line.setData(0, connection.source_block_id)
             line.setData(1, "wire")
             line.setData(2, connection.source_outcome)
             line.setData(3, source_port)
+            terminal_label = (
+                target_block.name or t(f"function.block.{target_block.block_type}")
+                if terminal else ""
+            )
             line.setToolTip(
-                t("function.wire_hint")
+                f"{terminal_label}: {target_block.name or target_block.block_id}\n{t('function.wire_hint')}"
+                if terminal else t("function.wire_hint")
             )
             line.setZValue(1)
             label = self.scene_model.addText(
-                connection.source_outcome
+                terminal_label if terminal else connection.source_outcome
             )
             label.setDefaultTextColor(color)
             label.setAcceptedMouseButtons(Qt.NoButton)
+            label.setToolTip(line.toolTip())
             label.setPos(
-                (source_position.x() + target_position.x()) / 2,
-                (source_position.y() + target_position.y()) / 2 - 14,
+                wire_end.x() + 3 if terminal else (source_position.x() + target_position.x()) / 2,
+                source_port.y() - 14 if terminal else (source_position.y() + target_position.y()) / 2 - 14,
             )
 
         self.open_end_count = open_end_count
@@ -1138,13 +1148,23 @@ class FunctionCanvas(QGraphicsView):
                         outcome
                     )
 
+                    terminal_block = next((b for b in blocks if b.block_id == target_id), None)
+                    terminal = terminal_block and terminal_block.block_type in (BLOCK_SUCCESS, BLOCK_FAILURE)
                     self.scene_model.addLine(
                         source.x() + 190,
                         source.y() + 41,
-                        target_position.x(),
-                        target_position.y() + 41,
+                        source.x() + 226 if terminal else target_position.x(),
+                        source.y() + 41 if terminal else target_position.y() + 41,
                         QPen(color, 2),
                     )
+                    if terminal:
+                        label = self.scene_model.addText(
+                            terminal_block.name or t(f"function.block.{terminal_block.block_type}")
+                        )
+                        label.setDefaultTextColor(color)
+                        label.setAcceptedMouseButtons(Qt.NoButton)
+                        label.setPos(source.x() + 229, source.y() + 27)
+                        label.setToolTip(terminal_block.name or terminal_block.block_id)
 
         self._fit_scene_to_content()
         self._create_block_highlights(blocks)

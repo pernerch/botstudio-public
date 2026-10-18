@@ -11,7 +11,7 @@ import zipfile
 
 from copy import deepcopy
 
-from models.bot_function import BotFunction, FunctionPackageOrigin, HelperDependency
+from models.bot_function import BotFunction, FunctionBlock, FunctionPackageOrigin, HelperDependency
 from models.github_account import GitHubAccount
 from scheduler.models import Event, Task
 from services.package_service import PackageError, PackageService
@@ -74,6 +74,182 @@ class GamePackageTests(unittest.TestCase):
             self.assertIn(value, preview)
         publication = self.service.github_release_metadata(manifest, str(self.archive))
         self.assertEqual(preview, publication["body"])
+
+    def _sample_library(self):
+        self.function.blocks = [
+            FunctionBlock.create("find_element", params={"library_entry_id": "image"}),
+        ]
+        (self.functions / "game/example.json").write_text(json.dumps(self.function.to_dict()), encoding="utf-8")
+        root = self.root / "library/image"
+        (root / "accepted").mkdir(parents=True)
+        (root / "rejected").mkdir()
+        from PySide6.QtGui import QImage
+        for name, color in (("pattern_reference.png", 0xFFFFFF),
+                            ("accepted/001_source.png", 0xFFFFFF),
+                            ("accepted/002_source.png", 0xFFFFFF),
+                            ("rejected/003_source.png", 0x111111)):
+            image = QImage(4, 4, QImage.Format_RGB32)
+            image.fill(color)
+            self.assertTrue(image.save(str(root / name)))
+        samples = []
+        for folder, number in (("accepted", "001"), ("accepted", "002"), ("rejected", "003")):
+            crop = root / folder / f"{number}_crop.png"
+            crop.write_bytes((root / folder / f"{number}_source.png").read_bytes())
+            match = root / folder / f"{number}_match.json"
+            match.write_text(json.dumps({"accepted": folder == "accepted", "bbox": {"x": 0, "y": 0, "width": 4, "height": 4},
+                                         "yolo": {"center_x": 0.5, "center_y": 0.5, "width": 1, "height": 1}}))
+            samples.append({key: str(path) for key, path in (
+                ("source", root / folder / f"{number}_source.png"), ("crop", crop), ("match", match),
+            )})
+        entry = {"entry_id": "image", "name": "Image", "boundary": {},
+                 "pattern": {"reference_path": str(root / "pattern_reference.png")},
+                 "accepted_samples": samples[:2], "rejected_samples": samples[2:], "sample_count": 3}
+        (root / "entry.json").write_text(json.dumps(entry), encoding="utf-8")
+        return root
+
+    def test_lossless_library_export_ready_roundtrip_and_legacy_fingerprint(self):
+        root = self._sample_library()
+        before = {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+        preview = self.service.preview_function_package(self.function, package_metadata=self.details)
+        self.export(self.details)
+        with zipfile.ZipFile(self.archive) as archive:
+            self.assertNotIn("content/library/image/accepted/002_source.png", archive.namelist())
+            self.assertIn("content/library/image/rejected/003_source.png", archive.namelist())
+            entry = json.loads(archive.read("content/library/image/entry.json"))
+            self.assertEqual(3, entry["sample_count"])
+            self.assertEqual(entry["accepted_samples"][0]["source"], entry["accepted_samples"][1]["source"])
+            for field in ("accepted_samples", "rejected_samples"):
+                for sample in entry[field]:
+                    for key in ("source", "crop", "match"):
+                        self.assertIn("content/library/" + sample[key], archive.namelist())
+            for relative, raw in before.items():
+                if relative not in ("entry.json", "accepted/002_source.png"):
+                    self.assertEqual(raw, archive.read("content/library/image/" + relative))
+            legacy_files = {name: archive.read(name) for name in archive.namelist() if name.startswith("content/")}
+            manifest = json.loads(archive.read("manifest.json"))
+        for relative, raw in before.items():
+            legacy_files["content/library/image/" + relative] = raw
+        manifest["checksums"] = {name: hashlib.sha256(raw).hexdigest() for name, raw in legacy_files.items()}
+        legacy = self.root / "legacy.zip"
+        with zipfile.ZipFile(legacy, "w") as archive:
+            archive.writestr("manifest.json", json.dumps(manifest))
+            archive.writestr("checksums.json", json.dumps(manifest["checksums"]))
+            for name, raw in legacy_files.items():
+                archive.writestr(name, raw)
+        self.assertEqual(preview["content_fingerprint"], self.service.archive_content_fingerprint(legacy))
+        ready = self.root / "ready"
+        self.service.prepare_function_directory(
+            self.function, str(ready), package_metadata=self.details, expected_checksums=preview["checksums"],
+        )
+        staged_zip = self.root / "ready.botstudio.zip"
+        self.service.create_ready_archive(str(ready), str(staged_zip), preview["checksums"])
+        self.assertEqual(preview["content_fingerprint"], self.service.archive_content_fingerprint(staged_zip))
+        imported = self.root / "imported"
+        self.service.import_package(str(staged_zip), str(imported))
+        imported_service = PackageService(
+            function_root=str(imported / "content/functions"),
+            library_service=Mock(root=imported / "content/library"),
+            variable_service=Mock(root=imported / "content/variables"),
+            game_service=self.service.game_service,
+        )
+        reexport = self.root / "again.zip"
+        imported_service.export_function(self.function, str(reexport), package_metadata=self.details)
+        self.assertEqual(preview["content_fingerprint"], imported_service.archive_content_fingerprint(reexport))
+        self.assertEqual(before, {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()})
+
+    def test_event_and_helper_include_optimized_library(self):
+        self._sample_library()
+        for kind in ("event", "helper"):
+            with self.subTest(kind=kind):
+                if kind == "event":
+                    event = Event(game_id="game", name="Event", tasks=[Task(function_ids=["example"])])
+                    self.service.export_event(event, str(self.archive), package_metadata=self.details)
+                else:
+                    self.function.kind = "helper"
+                    self.export(self.details)
+                with zipfile.ZipFile(self.archive) as archive:
+                    self.assertIn("content/library/image/entry.json", archive.namelist())
+                    self.assertNotIn("content/library/image/accepted/002_source.png", archive.namelist())
+
+    def test_library_deduplication_preserves_cross_entry_and_rejects_missing_assets(self):
+        root = self._sample_library()
+        files = {"content/library/image/" + p.relative_to(root).as_posix(): p.read_bytes()
+                 for p in root.rglob("*") if p.is_file()}
+        files["content/library/other/accepted/001_source.png"] = files["content/library/image/accepted/001_source.png"]
+        overrides, removed = self.service._portable_library_files(files, files.__getitem__)
+        self.assertEqual({"content/library/image/accepted/002_source.png"}, removed)
+        self.assertIn("content/library/image/entry.json", overrides)
+        del files["content/library/image/accepted/002_crop.png"]
+        with self.assertRaisesRegex(PackageError, "missing Library asset"):
+            self.service._portable_library_files(files, files.__getitem__)
+
+    def test_content_fingerprint_ignores_versions_but_keeps_description_images_and_logic(self):
+        original = self.service.preview_function_package(
+            self.function, description="Instructions", package_metadata=self.details,
+        )["content_fingerprint"]
+        self.service.export_function(
+            self.function, str(self.archive), description="Instructions", package_metadata=self.details,
+        )
+        self.assertEqual(original, self.service.archive_content_fingerprint(self.archive))
+        function_data = self.function.to_dict()
+        function_data.update(revision=99, revised_at="2030-01-01", used_by=["other"],
+                             layout_positions={"a": [30, 40]})
+        source = self.functions / "game" / "example.json"
+        source.write_text(json.dumps(function_data), encoding="utf-8")
+        metadata = {**self.details, "package_version": "9.0.0", "rights_confirmed": False}
+        preview = self.service.preview_function_package(
+            self.function, description="Instructions", package_metadata=metadata,
+        )
+        self.assertEqual(original, preview["content_fingerprint"])
+        changed_description = self.service.preview_function_package(
+            self.function, description="New instructions", package_metadata=metadata,
+        )
+        self.assertNotEqual(original, changed_description["content_fingerprint"])
+        function_data["description"] = "Different function instructions"
+        source.write_text(json.dumps(function_data), encoding="utf-8")
+        self.assertNotEqual(original, self.service.preview_function_package(
+            self.function, description="Instructions", package_metadata=metadata,
+        )["content_fingerprint"])
+        function_data["description"] = self.function.description
+        function_data["blocks"] = [{"block_id": "a", "block_type": "logic"}]
+        source.write_text(json.dumps(function_data), encoding="utf-8")
+        self.assertNotEqual(original, self.service.preview_function_package(
+            self.function, description="Instructions", package_metadata=metadata,
+        )["content_fingerprint"])
+        source.write_text(json.dumps(self.function.to_dict()), encoding="utf-8")
+        image = self.root / "image.png"
+        image.write_bytes(b"first-image")
+        options = {
+            "description": "Instructions", "package_metadata": metadata,
+            "package_assets": {"content/package-assets/image-01.png": image},
+        }
+        with_image = self.service.preview_function_package(self.function, **options)["content_fingerprint"]
+        self.assertNotEqual(original, with_image)
+        image.write_bytes(b"second-image")
+        self.assertNotEqual(with_image, self.service.preview_function_package(
+            self.function, **options,
+        )["content_fingerprint"])
+
+    def test_event_content_fingerprint_ignores_profile_settings_and_ids(self):
+        first = Event(event_id="a", game_id="game", name="Example", tasks=[
+            Task(task_id="a", name="Task", function_ids=["example"]),
+        ])
+        second = Event.from_dict(first.to_dict())
+        second.event_id = "b"
+        second.profile_id = "other"
+        second.interval_seconds = 90
+        second.tasks[0].task_id = "b"
+        second.tasks[0].name = "Another label"
+        options = {"profile_id": "", "package_metadata": self.details}
+        expected = self.service.preview_event_package(first, **options)["content_fingerprint"]
+        actual = self.service.preview_event_package(second, **options)["content_fingerprint"]
+        self.assertEqual(expected, actual)
+        self.service.export_event(second, str(self.archive), **options)
+        self.assertEqual(expected, self.service.archive_content_fingerprint(self.archive))
+        second.output_variable = "different-output"
+        self.assertNotEqual(expected, self.service.preview_event_package(
+            second, **options,
+        )["content_fingerprint"])
 
     def test_legacy_package_is_inspectable_but_not_publishable(self):
         manifest = self.export()

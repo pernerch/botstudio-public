@@ -4,6 +4,8 @@ import faulthandler
 import hashlib
 import json
 import os
+import shutil
+import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import get_ident
@@ -74,6 +76,7 @@ class GitHubSubmissionTests(unittest.TestCase):
         self.fork_exists = False
         self.existing_version = False
         self.fail_path = None
+        self.blob_too_large = False
         self.transport = Mock(side_effect=self.respond)
         self.service = GitHubSubmissionService(self.preflight, self.publication, self.transport)
 
@@ -114,6 +117,11 @@ class GitHubSubmissionTests(unittest.TestCase):
         if path.endswith("/git/refs"):
             return self.response({"ref": data["ref"]}, 201)
         if path.endswith("/git/blobs"):
+            if self.blob_too_large:
+                return self.response({"message": (
+                    "Sorry, your input was too large to process. Consider creating the blob "
+                    "in a local clone of the repository and then pushing it to GitHub."
+                )}, 422)
             payload = base64.b64decode(data["content"])
             sha = hashlib.sha1(f"blob {len(payload)}\0".encode() + payload, usedforsecurity=False).hexdigest()
             return self.response({"sha": sha}, 201)
@@ -122,6 +130,8 @@ class GitHubSubmissionTests(unittest.TestCase):
         if path.endswith("/git/commits"):
             return self.response({"sha": "d" * 40}, 201)
         if "/git/refs/heads/" in path:
+            return self.response({"object": {"sha": "d" * 40}})
+        if "/git/ref/heads/botstudio-submit-" in path:
             return self.response({"object": {"sha": "d" * 40}})
         if path == "/repositories/10/pulls":
             return self.response({
@@ -146,6 +156,68 @@ class GitHubSubmissionTests(unittest.TestCase):
         with self.assertRaisesRegex(PackageError, "Authorize"):
             self.prepare()
 
+    def test_blob_input_limit_uses_exact_byte_git_push_then_checks_head_before_pr(self):
+        plan = self.prepare()
+        self.blob_too_large = True
+        with patch.object(self.service, "_push_git_commit", return_value="d" * 40) as push:
+            result = self.service.submit(self.archive, plan=plan)
+        self.assertEqual(7, result["number"])
+        remote, token, target, branch, payloads = push.call_args.args
+        self.assertEqual("https://github.com/contributor/botstudio-catalog-contributions.git", remote)
+        self.assertEqual("fixture_token", token)
+        self.assertEqual(plan["target"], target)
+        self.assertEqual(result["branch"], branch)
+        self.assertEqual(self.archive.read_bytes(), payloads[0][1])
+        self.assertEqual(plan["submission"], json.loads(payloads[1][1]))
+        self.assertFalse(any(path.endswith("/git/trees") for _, path, _ in self.calls))
+        self.assertTrue(any("/git/ref/heads/botstudio-submit-" in path for _, path, _ in self.calls))
+
+    def test_other_422_error_does_not_push_or_disclose_response(self):
+        self.service.request = Mock(return_value=self.response({"message": "private_error"}, 422))
+        with self.assertRaisesRegex(PackageError, "HTTP 422 during POST blobs") as caught:
+            self.service._api("POST", "/repositories/10/git/blobs", "fixture_token")
+        self.assertNotIn("private_error", str(caught.exception))
+
+    def test_large_archive_without_git_has_actionable_error(self):
+        with patch("services.github_submission_service.shutil.which", return_value=None):
+            with self.assertRaisesRegex(PackageError, "Install Git for Windows"):
+                self.service._push_git_commit("unused", "fixture_token", {}, "branch", [])
+
+    @unittest.skipUnless(shutil.which("git"), "Git integration requires an existing Git installation")
+    def test_git_transport_preserves_base_tree_and_both_payloads_without_credentials_on_disk(self):
+        remote = self.root / "remote.git"
+        env = dict(os.environ, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+                   GIT_AUTHOR_NAME="Test", GIT_AUTHOR_EMAIL="test@example.invalid",
+                   GIT_COMMITTER_NAME="Test", GIT_COMMITTER_EMAIL="test@example.invalid")
+
+        def git(*args, data=None):
+            return subprocess.run(
+                [shutil.which("git"), *args], cwd=self.root, env=env, input=data,
+                capture_output=True, check=True, timeout=10,
+            ).stdout.strip().decode()
+
+        git("init", "--bare", str(remote))
+        blob = git("--git-dir", str(remote), "hash-object", "-w", "--stdin", data=b"keep me")
+        tree = git("--git-dir", str(remote), "mktree",
+                   data=f"100644 blob {blob}\tREADME.txt\n".encode())
+        base = git("--git-dir", str(remote), "commit-tree", tree, data=b"Base\n")
+        git("--git-dir", str(remote), "update-ref", "refs/heads/submission", base)
+        payloads = [("packages/package.botstudio.zip", self.archive.read_bytes()),
+                    ("packages/submission.json", b'{"schema_version":1}')]
+        head = self.service._push_git_commit(
+            str(remote), "fixture_secret_token", {"base_commit": base, "base_tree": tree},
+            "submission", payloads,
+        )
+        self.assertEqual(head, git("--git-dir", str(remote), "rev-parse", "refs/heads/submission"))
+        self.assertEqual(base, git("--git-dir", str(remote), "rev-parse", f"{head}^"))
+        self.assertEqual("keep me", git("--git-dir", str(remote), "show", f"{head}:README.txt"))
+        for path, payload in payloads:
+            actual = subprocess.run(
+                [shutil.which("git"), "--git-dir", str(remote), "show", f"{head}:{path}"],
+                env=env, capture_output=True, check=True, timeout=10,
+            ).stdout
+            self.assertEqual(payload, actual)
+        self.assertNotIn("fixture_secret_token", (remote / "config").read_text())
     def test_submit_creates_exact_two_file_pr_and_never_merges_or_releases(self):
         plan = self.prepare()
         self.calls.clear()
@@ -220,12 +292,18 @@ class GitHubSubmissionTests(unittest.TestCase):
         for status, scopes in ((302, "public_repo"), (403, "public_repo"), (200, "repo"), (200, "")):
             with self.subTest(status=status, scopes=scopes):
                 response = self.response({"secret": "fixture_token"}, status, scopes)
-                service = GitHubSubmissionService(request=Mock(return_value=response))
+                service = GitHubSubmissionService(
+                    preflight=self.preflight, publication=self.publication,
+                    request=Mock(return_value=response),
+                )
                 with self.assertRaises(PackageError) as caught:
                     service._api("GET", "/user", "fixture_token")
                 self.assertNotIn("fixture_token", str(caught.exception))
                 response.close.assert_called_once_with()
-        service = GitHubSubmissionService(request=Mock(side_effect=requests.ConnectionError("fixture_token")))
+        service = GitHubSubmissionService(
+            preflight=self.preflight, publication=self.publication,
+            request=Mock(side_effect=requests.ConnectionError("fixture_token")),
+        )
         with self.assertRaises(PackageError) as caught:
             service._api("GET", "/user", "fixture_token")
         self.assertNotIn("fixture_token", str(caught.exception))

@@ -317,6 +317,8 @@ class ManagedPackagesDialog(QDialog):
         package = entry.get("package")
         if not package:
             return "unknown"
+        if package.get("package_type") in ("function", "helper", "event"):
+            return package["package_type"]
         package_id = package.get("package_id", "")
         for kind in ("function", "helper", "event"):
             if package_id.startswith(kind + "-"):
@@ -350,16 +352,18 @@ class ManagedPackagesDialog(QDialog):
             kind_label = t(f"packages.catalog_type_{kind}")
             labels = (
                 [
-                    kind_label, package["game_id"], package["package_id"],
+                    kind_label, package.get("game_name") or package["game_id"],
+                    package.get("package_name") or package["package_id"],
                     f"@{package['publisher'].login} (github:{package['publisher'].account_id})",
                 ] if package else [kind_label, t("packages.catalog_unclassified")]
             )
             parent = self.catalog_entries.invisibleRootItem()
             for depth, label in enumerate(labels):
                 # Numeric publisher IDs separate channels even when display names change.
-                key = tuple(labels[:depth]) + (
-                    package["publisher"].account_id if package and depth == 3 else label,
-                )
+                key = (
+                    kind, package["game_id"], package["package_id"],
+                    package["publisher"].account_id,
+                )[:depth + 1] if package else tuple(labels[:depth + 1])
                 if key not in groups:
                     groups[key] = QTreeWidgetItem(parent, [label])
                 parent = groups[key]
@@ -414,10 +418,19 @@ class ManagedPackagesDialog(QDialog):
         package = entry.get("package")
         if package:
             text = t("packages.catalog_declared").format(
-                game=package["game_id"], package=package["package_id"],
+                game=package.get("game_name") or package["game_id"],
+                package=package.get("package_name") or package["package_id"],
                 version=package["version"], login=package["publisher"].login,
                 account_id=package["publisher"].account_id,
             ) + "\n\n" + text
+            if package.get("author"):
+                text += "\n" + t("packages.author") + ": " + package["author"]
+            if package.get("contents"):
+                text += "\n" + t("packages.prepare_files") + "\n" + "\n".join(
+                    f"{name}: {count}" for name, count in package["contents"].items()
+                )
+            if package.get("description"):
+                text += "\n\n" + package["description"]
         return text
 
     def _download_catalog(self):

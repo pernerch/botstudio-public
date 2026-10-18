@@ -23,11 +23,23 @@ This repository starts with a clean snapshot of the current application
 source. It does not contain the private development history, credentials,
 profiles, game accounts, user packages, logs, backups or old test installers.
 
-Beta 1 uses version **0.1.0.7** and is published as a GitHub **prerelease**,
+Beta 1 uses version **0.1.0.8** and is published as a GitHub **prerelease**,
 not a stable release. Download the installer and its source/notice companions
 from [Releases](https://github.com/pernerch/botstudio-public/releases).
 Keep backups and use separate test data. Real two-machine/two-account game
 acceptance is an open beta task.
+
+Version 0.1.0.8 improves package source grouping, Event/Function/Helper
+selection, catalog names/search/author display, unchanged-publication checks
+and Function-editor End connection stubs. Package exports share byte-identical
+sample screenshots within each Library entry without removing distinct images,
+crops or annotations; local learning collections remain unchanged.
+Recreate existing ZIPs to benefit from the smaller exports.
+
+Large GitHub blob requests can fall back to an isolated Git push. This optional
+transport requires Git for Windows installed and available in PATH after a
+Studio restart. Git is not bundled or installed automatically. The catalog's
+100 MiB archive limit remains in effect.
 
 Thirty-eight hash-locked upstream archives include copyleft library sources,
 Qt release build configuration and Shapely's shared GEOS build recipe.

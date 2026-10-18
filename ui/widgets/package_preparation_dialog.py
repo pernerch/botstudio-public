@@ -1,6 +1,7 @@
 from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from time import monotonic
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal, Slot
 from PySide6.QtWidgets import (
@@ -9,8 +10,11 @@ from PySide6.QtWidgets import (
 )
 
 from services.package_service import PackageError, PackageService
+from models.bot_function import FUNCTION_KIND_HELPER
 from services.package_description_service import PackageDescriptionService
-from services.github_auth_service import GitHubAuthService
+from services.package_license_service import PackageLicenseError
+from services.github_auth_service import GitHubAuthError, GitHubAuthService
+from services.github_catalog_service import GitHubCatalogService
 from services.scheduler_service import SchedulerService
 from ui.i18n.translator import t
 from ui.widgets.package_markdown_editor import PackageMarkdownEditor
@@ -46,6 +50,7 @@ class PackagePreparationDialog(QDialog):
         scheduler_service_factory=None,
         description_service=None,
         auth_service=None,
+        catalog_service=None,
     ):
         super().__init__(parent)
         self.package_service = package_service or PackageService()
@@ -53,7 +58,9 @@ class PackagePreparationDialog(QDialog):
         self.scheduler_service_factory = scheduler_service_factory or SchedulerService
         self.description_service = description_service or PackageDescriptionService()
         self.auth_service = auth_service or GitHubAuthService()
+        self.catalog_service = catalog_service or GitHubCatalogService()
         self._source_descriptions = {}
+        self._source_names = {}
         self._draft_key = None
         self._draft_ready = False
         self.worker = None
@@ -71,6 +78,7 @@ class PackagePreparationDialog(QDialog):
         self.game = QComboBox()
         self.kind = QComboBox()
         self.kind.addItem(t("packages.prepare_function"), "function")
+        self.kind.addItem(t("packages.catalog_type_helper"), "helper")
         self.kind.addItem(t("packages.prepare_event"), "event")
         self.source = QComboBox()
         self.name = QLineEdit()
@@ -89,6 +97,11 @@ class PackagePreparationDialog(QDialog):
         form.addRow(t("packages.version"), self.version)
         form.addRow(t("packages.prepare_description"), description_row)
         layout.addLayout(form)
+        self.show_published = QCheckBox(t("packages.prepare_show_published"))
+        layout.addWidget(self.show_published)
+        self.catalog_status = QLabel()
+        self.catalog_status.setWordWrap(True)
+        layout.addWidget(self.catalog_status)
 
         self.preview_button = QPushButton(t("packages.prepare_preview"))
         layout.addWidget(self.preview_button)
@@ -115,6 +128,7 @@ class PackagePreparationDialog(QDialog):
 
         self.game.currentIndexChanged.connect(self._sources_changed)
         self.kind.currentIndexChanged.connect(self._sources_changed)
+        self.show_published.toggled.connect(self._sources_changed)
         self.source.currentIndexChanged.connect(self._source_selected)
         self.name.textChanged.connect(self._invalidate_preview)
         self.version.textChanged.connect(self._invalidate_preview)
@@ -147,11 +161,14 @@ class PackagePreparationDialog(QDialog):
         self._busy = busy
         for control in (
             self.game, self.kind, self.source, self.name, self.version, self.description_button,
+            self.show_published,
         ):
             control.setEnabled(not busy)
         self.close_button.setEnabled(not busy)
         if busy:
             self.status.setText(t("packages.prepare_working"))
+        else:
+            self.status.clear()
         self._update_controls()
 
     def _games_loaded(self, games):
@@ -191,24 +208,118 @@ class PackagePreparationDialog(QDialog):
             return
 
         kind = self.kind.currentData()
-        if kind == "function":
+        if kind in ("function", "helper"):
             def load_sources():
                 return [
                     (function.function_id, function.name or function.function_id,
                      function.name, function.description)
                     for function in self.package_service.list_saved_functions(game_id)
+                    if (function.kind == FUNCTION_KIND_HELPER) == (kind == "helper")
                 ]
         else:
             def load_sources():
                 service = self.scheduler_service_factory()
-                return [
-                    (event.event_id, event.name or event.event_id,
-                     event.name, "")
-                    for event in service.list_events(game_id)
-                ]
-        self._run(load_sources, self._sources_loaded)
+                return self.package_service.preparation_event_sources(
+                    service.list_events(game_id),
+                )
+        show_published = self.show_published.isChecked()
+        self.catalog_status.setText(t("packages.prepare_catalog_checking"))
+
+        def checked_sources():
+            sources = load_sources()
+            if show_published or not sources:
+                return sources, "", None
+            try:
+                account = self.auth_service.restore()
+                if account is None:
+                    raise PackageError(t("packages.prepare_catalog_sign_in"))
+                published = self.catalog_service.published_content(
+                    game_id, account, self.package_service,
+                )
+            except (PackageError, GitHubAuthError, OSError) as error:
+                return sources, str(error), 0
+            if not published:
+                return sources, "", 0
+            visible, errors = [], []
+            started = monotonic()
+            for source_id, label, name, seed in sources:
+                if monotonic() - started > 30:
+                    return sources, t("packages.prepare_catalog_local_timeout"), 0
+                if (name or label, kind) not in published.values():
+                    visible.append((source_id, label, name, seed))
+                    continue
+                try:
+                    draft_kind = "function" if kind == "helper" else kind
+                    draft = self._load_source_draft((game_id, draft_kind, source_id), seed)
+                    preview = self._source_preview(
+                        game_id, kind, source_id, name or label, draft["markdown"],
+                        draft["assets"], account,
+                    )
+                    if preview["content_fingerprint"] in published:
+                        continue
+                except (PackageError, PackageLicenseError, OSError) as error:
+                    errors.append(f"{label}: {error}")
+                visible.append((source_id, label, name, seed))
+            return visible, "\n".join(errors), len(sources) - len(visible)
+
+        self._run(checked_sources, self._checked_sources_loaded)
+
+    def _checked_sources_loaded(self, result):
+        sources, error, hidden = result
+        self.catalog_status.setText(
+            t("packages.prepare_catalog_failed").format(error=error)
+            if error else (
+                t("packages.prepare_catalog_not_filtered") if hidden is None
+                else t("packages.prepare_catalog_checked").format(count=hidden)
+            )
+        )
+        self._sources_loaded(sources)
+
+    def _source_preview(self, game_id, kind, source_id, name, description, assets, account, version=None):
+        options = {
+            "package_name": name, "description": description, "profile_id": "",
+            "package_assets": assets, "publication_account": account, "package_version": version,
+        }
+        if kind in ("function", "helper"):
+            function = self.package_service.load_saved_function(game_id, source_id)
+            return self.package_service.preview_function_package(function, **options)
+        event = self.scheduler_service_factory().load_event(game_id, source_id)
+        if event is None:
+            raise PackageError("the selected Event no longer exists")
+        return self.package_service.preview_event_package(event, **options)
+
+    def _load_source_draft(self, key, seed):
+        game_id, kind, source_id = key
+        if self.description_service.has_draft(key):
+            return self.description_service.load(key, seed)
+        if kind == "function":
+            functions = [self.package_service.load_saved_function(game_id, source_id)]
+        else:
+            event = self.scheduler_service_factory().load_event(game_id, source_id)
+            if event is None:
+                raise PackageError("the selected Event no longer exists")
+            functions = [
+                self.package_service.load_saved_function(game_id, function_id)
+                for task in event.tasks for function_id in task.function_ids
+            ]
+        matching = [
+            (manifest, path)
+            for manifest, path in self.package_service.publication_sources(functions)
+            if manifest.get("package_type") in (
+                ("function", "helper") if kind == "function" else ("event",)
+            ) and manifest.get("source_id") == source_id
+        ]
+        if len(matching) > 1:
+            raise PackageError("multiple source package channels match the description")
+        return self.description_service.load(
+            key, seed, package_source=matching[0] if matching else None,
+        )
 
     def _sources_loaded(self, sources):
+        sources = sorted(sources, key=lambda source: (source[1].casefold(), source[0]))
+        self._source_names = {
+            source_id: name or label for source_id, label, name, _ in sources
+        }
         self._source_descriptions = {
             source_id: description for source_id, _, _, description in sources
         }
@@ -230,39 +341,15 @@ class PackagePreparationDialog(QDialog):
         self.description = ""
         self.package_assets = {}
         self.version.clear()
-        self.name.setText(self.source.currentText() if source_id else "")
+        self.name.setText(self._source_names.get(source_id, "") if source_id else "")
         self._update_description_summary()
         if source_id:
-            key = (self.game.currentData(), self.kind.currentData(), source_id)
+            kind = "function" if self.kind.currentData() == "helper" else self.kind.currentData()
+            key = (self.game.currentData(), kind, source_id)
             self._draft_key = key
             seed = self._source_descriptions.get(source_id, "")
 
-            def load_draft():
-                if self.description_service.has_draft(key):
-                    return self.description_service.load(key, seed)
-                if key[1] == "function":
-                    functions = [self.package_service.load_saved_function(key[0], source_id)]
-                else:
-                    event = self.scheduler_service_factory().load_event(key[0], source_id)
-                    if event is None:
-                        raise PackageError("the selected Event no longer exists")
-                    functions = [
-                        self.package_service.load_saved_function(key[0], function_id)
-                        for task in event.tasks for function_id in task.function_ids
-                    ]
-                matching = [
-                    (manifest, path)
-                    for manifest, path in self.package_service.publication_sources(functions)
-                    if manifest.get("package_type") == key[1]
-                    and manifest.get("source_id") == source_id
-                ]
-                if len(matching) > 1:
-                    raise PackageError("multiple source package channels match the description")
-                return self.description_service.load(
-                    key, seed, package_source=matching[0] if matching else None,
-                )
-
-            self._run(load_draft, self._draft_loaded)
+            self._run(lambda: self._load_source_draft(key, seed), self._draft_loaded)
         self._update_controls()
 
     def _draft_loaded(self, draft):
@@ -270,6 +357,7 @@ class PackagePreparationDialog(QDialog):
         self.package_assets = draft["assets"]
         self._draft_ready = True
         self._update_description_summary()
+        self.status.setText(t("packages.prepare_draft_loaded"))
         self._update_controls()
 
     def _edit_description(self):
@@ -324,31 +412,14 @@ class PackagePreparationDialog(QDialog):
 
         def create_preview():
             publication_account = self.auth_service.restore()
-            if kind == "function":
-                function = self.package_service.load_saved_function(game_id, source_id)
-                preview = self.package_service.preview_function_package(
-                    function,
-                    package_name,
-                    description,
-                    profile_id="",
-                    package_assets=package_assets,
-                    publication_account=publication_account,
-                    package_version=package_version,
-                )
-            else:
-                scheduler = self.scheduler_service_factory()
-                event = scheduler.load_event(game_id, source_id)
-                if event is None:
-                    raise PackageError("the selected Event no longer exists")
-                preview = self.package_service.preview_event_package(
-                    event,
-                    package_name,
-                    description,
-                    profile_id="",
-                    package_assets=package_assets,
-                    publication_account=publication_account,
-                    package_version=package_version,
-                )
+            preview = self._source_preview(
+                game_id, kind, source_id, package_name, description, package_assets,
+                publication_account, package_version,
+            )
+            if publication_account is not None and preview["content_fingerprint"] in (
+                self.catalog_service.published_content(game_id, publication_account, self.package_service)
+            ):
+                raise PackageError(t("packages.prepare_already_published"))
 
             candidate = deepcopy(preview["manifest"])
             metadata = candidate.get("package_metadata")
@@ -433,9 +504,16 @@ class PackagePreparationDialog(QDialog):
         package_assets = dict(self.package_assets)
 
         def create_archive():
+            account = self.auth_service.restore()
+            if account is None or account.to_dict() != manifest_metadata["publisher"]:
+                raise PackageError(t("packages.prepare_catalog_sign_in"))
+            if preview["content_fingerprint"] in self.catalog_service.published_content(
+                game_id, account, self.package_service,
+            ):
+                raise PackageError(t("packages.prepare_already_published"))
             with TemporaryDirectory(prefix="botstudio-package-") as temporary:
                 ready_directory = Path(temporary) / "ready"
-                if kind == "function":
+                if kind in ("function", "helper"):
                     function = self.package_service.load_saved_function(game_id, source_id)
                     self.package_service.prepare_function_directory(
                         function,

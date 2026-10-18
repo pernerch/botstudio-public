@@ -20,7 +20,8 @@ from services.package_license_service import (
     PackageLicenseService,
     PackagePreparationService,
 )
-from services.package_service import PackageService
+from services.package_service import PackageError, PackageService
+from services.scheduler_service import Event, Task, PROTECTED_TASK_KINDS
 from services.package_description_service import PackageDescriptionService
 from ui.widgets.managed_packages_dialog import _PackageDetails
 from ui.i18n.translator import t
@@ -59,6 +60,13 @@ class PackagePreparationDialogTests(unittest.TestCase):
         self.auth_service = Mock(
             restore=Mock(return_value=GitHubAccount("120588088", "pernerch")),
         )
+        self.catalog_service = Mock(published_content=Mock(return_value={}))
+        catalog_patch = patch(
+            "ui.widgets.package_preparation_dialog.GitHubCatalogService",
+            return_value=self.catalog_service,
+        )
+        catalog_patch.start()
+        self.addCleanup(catalog_patch.stop)
         credential_patch = patch(
             "ui.widgets.package_preparation_dialog.GitHubAuthService",
             return_value=self.auth_service,
@@ -130,6 +138,336 @@ class PackagePreparationDialogTests(unittest.TestCase):
         self.assertTrue(image.save(str(path), "PNG"))
         return path
 
+    def test_event_sources_group_profiles_and_history_but_keep_content_variants(self):
+        first = Event(
+            event_id="event-a", game_id="game", profile_id="account-a", name="Pet Skill",
+            tasks=[Task(task_id="task-a", name="Read", function_ids=["example"])],
+        )
+        copy = Event.from_dict(first.to_dict())
+        copy.event_id = "event-b"
+        copy.profile_id = "account-b"
+        copy.sort_order = 10
+        copy.next_due_at = "2030-01-01T00:00:00"
+        copy.status = "running"
+        copy.tasks[0].task_id = "task-b"
+        copy.tasks[0].duration_samples_seconds = [12]
+        variant = Event.from_dict(copy.to_dict())
+        variant.event_id = "event-c"
+        variant.tasks[0].function_ids = ["different"]
+        before = [item.to_dict() for item in (first, copy, variant)]
+        sources = self.package_service.preparation_event_sources([copy, variant, first])
+        self.assertEqual(["event-a", "event-c"], [item[0] for item in sources])
+        self.assertEqual(2, len({item[1] for item in sources}))
+        self.assertEqual(before, [item.to_dict() for item in (first, copy, variant)])
+        self.assertEqual(
+            [("event-a", "Pet Skill", "Pet Skill", "")],
+            self.package_service.preparation_event_sources([copy, first]),
+        )
+
+    def test_same_event_with_local_settings_is_not_a_separate_variant(self):
+        first = Event(event_id="a", game_id="game", name="Pet Skill")
+        second = Event.from_dict(first.to_dict())
+        second.event_id = "b"
+        second.interval_seconds = 3600
+        second.enabled = False
+        second.priority = 5
+        second.schedule_mode = "interval"
+        second.run_at_local = ["12:00"]
+        second.cooldown_seconds = 90
+        second.retry_minutes = 10
+        first.tasks = [Task(task_id="a", name="Run", function_ids=["example"])]
+        second.tasks = [Task(
+            task_id="b", name="Run", function_ids=["example"], enabled=False,
+            priority=1, sort_order=3,
+        )]
+        before = [event.to_dict() for event in (first, second)]
+        self.assertEqual(1, len(self.package_service.preparation_event_sources([first, second])))
+        self.assertEqual(before, [event.to_dict() for event in (first, second)])
+        second.output_variable = "different-output"
+        self.assertEqual(2, len(self.package_service.preparation_event_sources([first, second])))
+
+    def test_task_labels_do_not_duplicate_intel_and_empty_pet_skill_is_hidden(self):
+        intel = Event(event_id="intel-a", game_id="game", name="Intel", tasks=[
+            Task(name="Intel Mission Available", function_ids=["check-intel"]),
+            Task(name="Intel Lighthouse", function_ids=["lighthouse"]),
+        ])
+        other = Event.from_dict(intel.to_dict())
+        other.event_id = "intel-b"
+        other.profile_id = "other-profile"
+        other.tasks[0].name = "Intel Missions Available"
+        pet = Event(event_id="pet-a", game_id="game", name="Pet Skill", tasks=[
+            Task(name="Pet Skill", function_ids=["pet-skill"]),
+        ])
+        empty = Event(event_id="pet-b", game_id="game", name="Pet Skill")
+        no_functions = Event(event_id="pet-c", game_id="game", name="Pet Skill",
+                             tasks=[Task(name="Not configured")])
+        events = [intel, other, pet, empty, no_functions]
+        before = [event.to_dict() for event in events]
+        sources = self.package_service.preparation_event_sources(events)
+        self.assertEqual(["Intel", "Pet Skill"], [source[1] for source in sources])
+        self.assertEqual(["intel-a", "pet-a"], [source[0] for source in sources])
+        self.assertEqual(before, [event.to_dict() for event in events])
+        other.tasks[0].function_ids = ["different-function"]
+        self.assertEqual(2, len(self.package_service.preparation_event_sources([intel, other])))
+        other.tasks[0].function_ids = ["check-intel"]
+        other.tasks.reverse()
+        self.assertEqual(2, len(self.package_service.preparation_event_sources([intel, other])))
+
+    def test_helper_selector_preserves_type_drafts_and_exports(self):
+        function = self.package_service.load_saved_function("game", "example")
+        function.function_id = "helper"
+        function.name = "Helper example"
+        function.kind = "helper"
+        (self.function_root / "game" / "helper.json").write_text(
+            json.dumps(function.to_dict()), encoding="utf-8",
+        )
+        key = ("game", "function", "helper")
+        self.description_service.save(key, "Existing helper draft", {})
+        dialog = PackagePreparationDialog(package_service=self.package_service)
+        self.addCleanup(dialog.deleteLater)
+        self.wait_for_idle(dialog)
+        self.assertEqual(1, dialog.source.count())
+        self.assertEqual("example", dialog.source.currentData())
+        dialog.kind.setCurrentIndex(dialog.kind.findData("helper"))
+        self.wait_for_idle(dialog)
+        self.assertEqual(1, dialog.source.count())
+        self.assertEqual("helper", dialog.source.currentData())
+        self.assertEqual("Existing helper draft", dialog.description)
+        dialog._preview_package()
+        self.wait_for_idle(dialog)
+        self.assertIsNotNone(dialog._preview, dialog.status.text())
+        self.assertTrue(dialog._preview["manifest"]["package_metadata"]["package_id"].startswith("helper-"))
+        dialog.rights.setChecked(True)
+        output = self.root / "helper.botstudio.zip"
+        with patch("ui.widgets.package_preparation_dialog.QFileDialog.getSaveFileName",
+                   return_value=(str(output), "")), patch(
+                       "ui.widgets.package_preparation_dialog.QMessageBox.information",
+                   ):
+            dialog._choose_destination()
+            self.wait_for_idle(dialog)
+        self.assertTrue(output.is_file(), dialog.status.text())
+        with zipfile.ZipFile(output) as archive:
+            content = json.loads(archive.read("content/functions/game/helper.json"))
+        self.assertEqual("helper", content["kind"])
+
+    def test_system_events_are_not_package_sources_and_keep_their_protection(self):
+        events = [
+            Event(event_id="init", game_id="game", name="Renamed Init", is_init=True),
+            Event(event_id="interrupt", game_id="game", name="Renamed Interrupt", is_interrupt=True),
+            Event(event_id="protected", game_id="game", tasks=[Task(protected=True)]),
+            *[
+                Event(event_id=kind, game_id="game", tasks=[Task(kind=kind)])
+                for kind in PROTECTED_TASK_KINDS
+            ],
+        ]
+        regular = Event(event_id="normal", game_id="game", name="Journey of Light",
+                        tasks=[Task(function_ids=["example"])])
+        before = [event.to_dict() for event in events]
+        self.assertEqual(
+            [("normal", "Journey of Light", "Journey of Light", "")],
+            self.package_service.preparation_event_sources([*events, regular]),
+        )
+        self.assertEqual([], self.package_service.preparation_event_sources(events))
+        for event in events:
+            for operation in (
+                lambda: self.package_service.preview_event_package(event),
+                lambda: self.package_service.export_event(event, str(self.root / "blocked.zip")),
+                lambda: self.package_service.prepare_event_directory(event, str(self.root / "blocked")),
+            ):
+                with self.subTest(event=event.event_id, operation=operation):
+                    with self.assertRaisesRegex(PackageError, "protected|system"):
+                        operation()
+        self.assertFalse((self.root / "blocked.zip").exists())
+        self.assertFalse((self.root / "blocked").exists())
+        self.assertEqual(before, [event.to_dict() for event in events])
+
+    def test_system_events_hidden_but_their_functions_can_be_packaged(self):
+        events = [
+            Event(event_id="init", game_id="game", is_init=True, tasks=[
+                Task(protected=True, function_ids=["example"]),
+            ]),
+            Event(event_id="interrupt", game_id="game", is_interrupt=True, tasks=[
+                Task(function_ids=["example"]),
+            ]),
+        ]
+        scheduler = Mock(list_events=Mock(return_value=events))
+        dialog = PackagePreparationDialog(
+            package_service=self.package_service,
+            scheduler_service_factory=lambda: scheduler,
+        )
+        self.addCleanup(dialog.deleteLater)
+        self.wait_for_idle(dialog)
+        dialog.kind.setCurrentIndex(dialog.kind.findData("event"))
+        self.wait_for_idle(dialog)
+        self.assertEqual(0, dialog.source.count())
+        self.assertFalse(dialog.preview_button.isEnabled())
+        dialog.kind.setCurrentIndex(dialog.kind.findData("function"))
+        self.wait_for_idle(dialog)
+        self.assertEqual("example", dialog.source.currentData())
+        function = self.package_service.load_saved_function("game", "example")
+        preview = self.package_service.preview_function_package(
+            function, profile_id="", publication_account=GitHubAccount("120588088", "pernerch"),
+        )
+        self.assertEqual("function", preview["manifest"]["package_type"])
+        archive = self.root / "function.zip"
+        self.package_service.export_function(function, str(archive), profile_id="")
+        self.assertTrue(archive.is_file())
+        self.assertTrue(events[0].is_init)
+        self.assertTrue(events[0].tasks[0].protected)
+        self.assertTrue(events[1].is_interrupt)
+
+    def test_event_selector_shows_identical_account_content_only_once(self):
+        first = Event(event_id="a", game_id="game", profile_id="one", name="Pet Skill",
+                      tasks=[Task(function_ids=["example"])])
+        second = Event.from_dict(first.to_dict())
+        second.event_id = "b"
+        second.profile_id = "two"
+        scheduler = Mock(
+            list_events=Mock(return_value=[second, first]),
+            load_event=Mock(return_value=first),
+        )
+        dialog = PackagePreparationDialog(
+            package_service=self.package_service,
+            scheduler_service_factory=lambda: scheduler,
+        )
+        self.addCleanup(dialog.deleteLater)
+        self.wait_for_idle(dialog)
+        dialog.kind.setCurrentIndex(dialog.kind.findData("event"))
+        self.wait_for_idle(dialog)
+        self.assertEqual(1, dialog.source.count())
+        self.assertEqual("a", dialog.source.currentData())
+        self.assertEqual("Pet Skill", dialog.name.text())
+
+    def test_loading_source_does_not_leave_working_status_after_worker_finishes(self):
+        dialog = PackagePreparationDialog(package_service=self.package_service)
+        self.addCleanup(dialog.deleteLater)
+        self.wait_for_idle(dialog)
+        self.assertTrue(dialog._draft_ready)
+        self.assertTrue(dialog.preview_button.isEnabled())
+        self.assertTrue(dialog.close_button.isEnabled())
+        self.assertEqual(t("packages.prepare_draft_loaded"), dialog.status.text())
+        self.assertNotEqual(t("packages.prepare_working"), dialog.status.text())
+
+    def test_saved_sources_are_sorted_alphabetically_for_every_package_type(self):
+        dialog = PackagePreparationDialog(package_service=self.package_service)
+        self.addCleanup(dialog.deleteLater)
+        self.wait_for_idle(dialog)
+        sources = [
+            ("z", "Zulu", "Zulu", ""),
+            ("b", "beta", "beta", ""),
+            ("a2", "Alpha", "Alpha", ""),
+            ("a1", "alpha", "alpha", ""),
+        ]
+        for kind in ("event", "function", "helper"):
+            with self.subTest(kind=kind):
+                dialog.kind.blockSignals(True)
+                dialog.kind.setCurrentIndex(dialog.kind.findData(kind))
+                dialog.kind.blockSignals(False)
+                dialog.source.clear()
+                with patch.object(dialog, "_source_selected"):
+                    dialog._sources_loaded(sources)
+                self.assertEqual(
+                    ["a1", "a2", "b", "z"],
+                    [dialog.source.itemData(index) for index in range(dialog.source.count())],
+                )
+        self.assertEqual(["z", "b", "a2", "a1"], [source[0] for source in sources])
+
+    def published_function_fingerprint(self):
+        function = self.package_service.load_saved_function("game", "example")
+        return self.package_service.preview_function_package(
+            function, description="An example Function", profile_id="",
+            publication_account=GitHubAccount("120588088", "pernerch"),
+        )["content_fingerprint"]
+
+    def test_unchanged_published_source_is_hidden_but_can_be_shown_for_editing(self):
+        self.catalog_service.published_content.return_value = {
+            self.published_function_fingerprint(): ("Example", "function"),
+        }
+        dialog = PackagePreparationDialog(package_service=self.package_service)
+        self.addCleanup(dialog.deleteLater)
+        self.wait_for_idle(dialog)
+        self.assertEqual(0, dialog.source.count())
+        self.assertIn("1", dialog.catalog_status.text())
+        dialog.show_published.setChecked(True)
+        self.wait_for_idle(dialog)
+        self.assertEqual("example", dialog.source.currentData())
+        dialog.version.setText("9.0.0")
+        dialog._preview_package()
+        self.wait_for_idle(dialog)
+        self.assertIsNone(dialog._preview)
+        self.assertIn(t("packages.prepare_already_published"), dialog.status.text())
+        dialog.description = "Changed instructions"
+        dialog._preview_package()
+        self.wait_for_idle(dialog)
+        self.assertIsNotNone(dialog._preview, dialog.status.text())
+        self.assertTrue(dialog._ready)
+
+    def test_published_check_failure_leaves_sources_visible_with_explicit_warning(self):
+        self.catalog_service.published_content.side_effect = PackageError("network unavailable")
+        dialog = PackagePreparationDialog(package_service=self.package_service)
+        self.addCleanup(dialog.deleteLater)
+        self.wait_for_idle(dialog)
+        self.assertEqual("example", dialog.source.currentData())
+        self.assertIn("network unavailable", dialog.catalog_status.text())
+        dialog._preview_package()
+        self.wait_for_idle(dialog)
+        self.assertIsNone(dialog._preview)
+        self.assertIn("network unavailable", dialog.status.text())
+
+    def test_fresh_publication_check_prevents_export_after_another_client_published(self):
+        dialog = PackagePreparationDialog(package_service=self.package_service)
+        self.addCleanup(dialog.deleteLater)
+        self.wait_for_idle(dialog)
+        dialog._preview_package()
+        self.wait_for_idle(dialog)
+        fingerprint = dialog._preview["content_fingerprint"]
+        dialog.rights.setChecked(True)
+        self.catalog_service.published_content.return_value = {fingerprint: ("Example", "function")}
+        output = self.root / "no-update.botstudio.zip"
+        with patch("ui.widgets.package_preparation_dialog.QFileDialog.getSaveFileName",
+                   return_value=(str(output), "")):
+            dialog._choose_destination()
+        self.wait_for_idle(dialog)
+        self.assertFalse(output.exists())
+        self.assertIn(t("packages.prepare_already_published"), dialog.status.text())
+
+    def test_changed_saved_description_remains_in_default_source_list(self):
+        self.catalog_service.published_content.return_value = {
+            self.published_function_fingerprint(): ("Example", "function"),
+        }
+        self.description_service.save(("game", "function", "example"), "New description", {})
+        dialog = PackagePreparationDialog(package_service=self.package_service)
+        self.addCleanup(dialog.deleteLater)
+        self.wait_for_idle(dialog)
+        self.assertEqual("example", dialog.source.currentData())
+        self.assertEqual("New description", dialog.description)
+
+    def test_published_event_is_hidden_despite_different_local_scheduling(self):
+        event = Event(event_id="event", game_id="game", name="Pet Skill", tasks=[
+            Task(task_id="task", name="Run", function_ids=["example"]),
+        ])
+        preview = self.package_service.preview_event_package(
+            event, profile_id="", publication_account=GitHubAccount("120588088", "pernerch"),
+        )
+        self.catalog_service.published_content.return_value = {
+            preview["content_fingerprint"]: ("Pet Skill", "event"),
+        }
+        event.interval_seconds = 900
+        event.cooldown_seconds = 100
+        scheduler = Mock(list_events=Mock(return_value=[event]), load_event=Mock(return_value=event))
+        dialog = PackagePreparationDialog(
+            package_service=self.package_service, scheduler_service_factory=lambda: scheduler,
+        )
+        self.addCleanup(dialog.deleteLater)
+        self.wait_for_idle(dialog)
+        self.assertEqual("example", dialog.source.currentData())
+        dialog.kind.setCurrentIndex(dialog.kind.findData("event"))
+        self.wait_for_idle(dialog)
+        self.assertEqual(0, dialog.source.count())
+        self.assertIn("1", dialog.catalog_status.text())
+        self.assertEqual(900, event.interval_seconds)
+        self.assertEqual(100, event.cooldown_seconds)
+
     def test_markdown_editor_attaches_and_removes_an_image_reference(self):
         image_path = self.write_test_image(self.root / "screenshot.png")
         editor = PackageMarkdownEditor()
@@ -181,6 +519,7 @@ class PackagePreparationDialogTests(unittest.TestCase):
         self.wait_for_idle(dialog)
         self.assertEqual("## Saved instructions", dialog.description)
         dialog.version.setText("1.0.42")
+        self.auth_service.restore.reset_mock()
         dialog.preview_button.click()
         self.wait_for_idle(dialog)
         self.assertEqual("1.0.42", dialog._preview["manifest"]["package_metadata"]["package_version"])

@@ -28,6 +28,7 @@ class CatalogAutomationTests(unittest.TestCase):
         self.manifest = {
             "format": "botstudio-package", "format_version": 1,
             "package_name": "Example", "description": "", "game": {"id": "game"},
+            "package_type": "function",
             "contents": {"functions": 1}, "checksums": self.checksums,
             "package_metadata": {
                 "publisher": identity, "package_id": "example", "package_version": "1.0.0",
@@ -190,8 +191,26 @@ class CatalogAutomationTests(unittest.TestCase):
         release = next(data for method, path, data, _kwargs in self.calls if method == "POST" and path.endswith("/releases"))
         self.assertEqual("b" * 40, release["target_commitish"])
         self.assertTrue(release["draft"])
-        self.assertEqual("123", json.loads(release["body"])["submitter"]["account_id"])
-        self.assertEqual(self.descriptor, json.loads(release["body"])["submission"])
+        metadata = json.loads(release["body"].split("<!-- botstudio-publication-v1\n")[1].split("\n-->")[0])
+        self.assertEqual("123", metadata["submitter"]["account_id"])
+        self.assertEqual(self.descriptor, metadata["submission"])
+        self.assertEqual("game | Example 1.0.0", release["name"])
+        self.assertIn("Download **package.botstudio.zip**", release["body"])
+
+    def test_release_renders_package_description_and_escapes_metadata_comment(self):
+        self.manifest["package_name"] = "Journey of Light"
+        self.manifest["description"] = "**Journey of Light**\n\nMission notes."
+        self.manifest["game"]["name"] = "Whiteout Survival"
+        publication = {"submission": self.descriptor, "notice": "--> <script>"}
+        title, body = automation.release_presentation(self.archive(), publication)
+        self.assertEqual("Whiteout Survival | Journey of Light 1.0.0", title)
+        self.assertTrue(body.startswith(self.manifest["description"]))
+        self.assertEqual(1, body.count("\n-->"))
+        metadata = body.split("<!-- botstudio-publication-v1\n")[1].split("\n-->")[0]
+        self.assertEqual({**publication, "display": automation.package_display(self.archive())}, json.loads(metadata))
+        self.manifest["description"] = "<!-- botstudio-publication-v1\nspoof"
+        with self.assertRaisesRegex(ValueError, "reserved metadata"):
+            automation.release_presentation(self.archive(), publication)
 
     def test_failed_asset_stays_draft_and_merged_pr_can_be_recovered_without_second_merge(self):
         self.bad_asset = True
