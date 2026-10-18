@@ -1,1 +1,4 @@
 release/licenses/*.txt -text
+release/requirements-runtime.txt -text
+release/distribution_materials.json -text
+release/dependency_sources.json -text

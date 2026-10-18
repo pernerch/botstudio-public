@@ -1,10 +1,14 @@
 param(
     [Parameter(Mandatory = $true)]
-    [string]$Destination
+    [string]$Destination,
+    [switch]$ApprovedBinaryRelease
 )
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
+if ($ApprovedBinaryRelease) {
+    & (Join-Path $PSScriptRoot "assert_distribution_ready.ps1")
+}
 $destinationPath = [System.IO.Path]::GetFullPath($Destination)
 if (Test-Path -LiteralPath $destinationPath) {
     throw "Public snapshot destination must not already exist."
@@ -56,17 +60,33 @@ try {
         -Destination (Join-Path $destinationPath "README.md")
     $reviewPath = Join-Path $destinationPath "release\distribution_review.json"
     $review = Get-Content -LiteralPath $reviewPath -Raw | ConvertFrom-Json
-    $review.status = "blocked"
-    $review.approved_runtime_manifest_sha256 = $null
-    $review.approved_materials_sha256 = $null
-    $review.approved_application_version = $null
-    $review.observations = @(
+    if ($ApprovedBinaryRelease) {
+        foreach ($entry in @(
+            @("approved_runtime_manifest_sha256", "requirements-runtime.txt"),
+            @("approved_materials_sha256", "distribution_materials.json"),
+            @("approved_dependency_sources_sha256", "dependency_sources.json")
+        )) {
+            $original = Get-Content -LiteralPath (Join-Path $PSScriptRoot $entry[1]) -Raw
+            $exported = Get-Content -LiteralPath (Join-Path (Split-Path $reviewPath) $entry[1]) -Raw
+            if ($original.Replace("`r`n", "`n") -cne $exported.Replace("`r`n", "`n")) {
+                throw "Approved public material differs beyond Git line endings: $($entry[1])"
+            }
+            $review.($entry[0]) = (Get-FileHash -LiteralPath (Join-Path (Split-Path $reviewPath) $entry[1]) -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+    } else {
+        $review.status = "blocked"
+        $review.approved_runtime_manifest_sha256 = $null
+        $review.approved_materials_sha256 = $null
+        $review.approved_dependency_sources_sha256 = $null
+        $review.approved_application_version = $null
+        $review.observations = @(
         "Clean public application source snapshot; private development history and test binaries are excluded."
         "GPL-3.0-only applies to the applicable BotStudio material."
         "Version/hash-bound upstream license supplements and model provenance are supplied."
         "Complete Qt/native attribution and copyleft dependency source delivery remain unresolved."
         "This source publication does not approve public installer distribution."
-    )
+        )
+    }
     $utf8 = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($reviewPath, (($review | ConvertTo-Json -Depth 10) + "`n"), $utf8)
 } finally {

@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import platform
 import re
+import shutil
 import sys
 
 
@@ -67,10 +68,25 @@ def distribution_materials(requirements: Path) -> dict:
 
 
 def collect_notices(requirements: Path, output: Path) -> list[tuple[str, str]]:
+    from release.prepare_dependency_sources import bundled_materials
+
     materials = distribution_materials(requirements)
+    source_datas, source_report = bundled_materials(
+        requirements.parent / "dependency_sources.json",
+        requirements.parent.parent / "build" / "dependency-materials",
+    )
     output.mkdir(parents=True, exist_ok=True)
+    source_notice_root = output / "source-notices"
+    if source_notice_root.exists():
+        shutil.rmtree(source_notice_root)
     records = []
     datas = []
+    for filename, destination in source_datas:
+        relative = Path(destination).relative_to("third_party")
+        target = output / relative / Path(filename).name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(Path(filename).read_bytes())
+        datas.append((str(target), destination))
     packages = pinned_packages(requirements)
     # The bootloader is shipped, and setuptools code is collected by hooks.
     packages.extend((name, metadata.version(name)) for name in ("pyinstaller", "setuptools"))
@@ -131,7 +147,7 @@ def collect_notices(requirements: Path, output: Path) -> list[tuple[str, str]]:
     missing = [item["name"] for item in records if not item["notice_files"]]
     if missing:
         raise ValueError(f"Missing third-party license texts: {', '.join(missing)}")
-    for filename in ("distribution_materials.json", "DISTRIBUTION.md"):
+    for filename in ("distribution_materials.json", "distribution_review.json", "DISTRIBUTION.md"):
         target = output / filename
         target.write_bytes((requirements.parent / filename).read_bytes())
         datas.append((str(target), "third_party"))
@@ -149,6 +165,11 @@ def collect_notices(requirements: Path, output: Path) -> list[tuple[str, str]]:
         "packages": records,
         "missing_notice_packages": missing,
         "model_provenance": materials["models"],
+        "dependency_sources": {
+            "source_lock_sha256": source_report["source_lock_sha256"],
+            "archive_count": len(source_report["archives"]),
+            "complete_corresponding_source_approved": False,
+        },
         "limitations": [
             "Declared wheel licenses are evidence, not distribution approval.",
             "Native dependencies, model weights, fonts and other assets require separate review.",
@@ -163,10 +184,15 @@ def collect_notices(requirements: Path, output: Path) -> list[tuple[str, str]]:
         "This directory preserves wheel notices and version/hash-bound upstream supplements.",
         "inventory.json records their relative paths and SHA-256 hashes.",
         "Python-LICENSE.txt contains the license supplied with the Python interpreter.",
+        "source-notices preserves upstream attribution, referenced license and build-document bytes.",
+        "source-index.json maps short installed filenames to original archive members.",
+        "dependency_sources.json locks source archive URLs, versions and SHA-256 values.",
         "",
-        "IMPORTANT: This collection is incomplete and is NOT distribution approval.",
+        "This automated collection is evidence, not an independent legal approval.",
         "Model provenance and exact model hashes are recorded in distribution_materials.json.",
-        "Qt/native attribution and complete dependency source delivery still need review.",
+        "See native-licenses.json for the verified binary-to-notice map and source groups.",
+        "The source-index approval flag describes automated acquisition, not the final release review.",
+        "Mandatory obligations and non-blocking follow-ups are recorded separately in distribution_review.json.",
         "See DISTRIBUTION.md for source locations, LGPL replacement instructions and limits.",
         "The repository distribution_review.json remains the public release approval gate.",
         "",

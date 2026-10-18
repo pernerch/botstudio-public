@@ -1,17 +1,38 @@
 {
     "schema_version":  1,
-    "status":  "blocked",
+    "status":  "approved",
     "reviewed_runtime_manifest":  "requirements-runtime.txt",
-    "approved_runtime_manifest_sha256":  null,
-    "approved_materials_sha256":  null,
-    "approved_application_version":  null,
+    "approved_runtime_manifest_sha256":  "99e0c0f5f17b571ece2a0eb3879461d602d7e03c54266c222740df944163ed9d",
+    "approved_materials_sha256":  "e10112f2b794c17dd8a58f30565c5481afb8beea3e313c6129af6cc2a988c14e",
+    "approved_dependency_sources_sha256":  "00fb71f54933194a9d36c90b7e146930c4f14da6037e233df756f6dae27c6652",
+    "approved_application_version":  "0.1.0.5",
     "evidence_date":  "2026-10-18",
     "observations":  [
-                         "Clean public application source snapshot; private development history and test binaries are excluded.",
-                         "GPL-3.0-only applies to the applicable BotStudio material.",
-                         "Version/hash-bound upstream license supplements and model provenance are supplied.",
-                         "Complete Qt/native attribution and copyleft dependency source delivery remain unresolved.",
-                         "This source publication does not approve public installer distribution."
+                         "The original frozen bundle included Qt6VirtualKeyboard.dll through the QtGui platform input plugin.",
+                         "A build hook removes that unused plugin before dependency analysis; rebuilt native-window and offline-OCR checks pass.",
+                         "The reduced bundle includes Qt Core, Gui, Network, Pdf, Svg and Widgets; no VirtualKeyboard/Qml/Quick DLLs were observed after rebuilding.",
+                         "Wheel license metadata does not establish the license of all native binaries or model weights.",
+                         "Christian Perner superseded the earlier source-available draft by explicitly choosing GPL-3.0-only on 2026-10-16.",
+                         "LICENSE contains the official GNU GPLv3 text; LICENSE-NOTICE.txt applies version 3 only to the applicable BotStudio material. Existing 0.1.0.2 installers are unchanged and do not contain these new notices.",
+                         "Private v0.1.0.3 at 302f80cd4a9eb530bac964cd2f9de3497e1b27be bundles the application LICENSE and LICENSE-NOTICE.txt and displays the GPL text in its installer. Workflow 39118042837 verified bundled bytes, executable features, installation, update, uninstall and data preservation.",
+                         "Application-notice integration is verified for private v0.1.0.3. Dependency compatibility, complete native/Qt attribution and exact complete Corresponding Source obligations remain pending; no public distribution approval is inferred.",
+                         "Supplementary upstream ANTLR, Flatbuffers, RapidOCR, Qt GPLv3 and LGPLv3 texts are now version/hash-bound in distribution_materials.json and validated by the notice collector. These additions are prospective; the published 0.1.0.3 installer is not rewritten.",
+                         "On 2026-10-18 the RapidAI ModelScope API declared Apache License 2.0 for its model repository. v3.9.2 file records and exact local model hashes/sizes matched all three shipped OCR files; identities and original file revisions are preserved in distribution_materials.json.",
+                         "Source preparation now produces exact committed application source, installed notices and a native-file inventory bound to the installer hash. This does not itself complete copyleft dependency Corresponding Source delivery.",
+                         "Visibility change would expose all historical releases and Git history, including older installers missing supplementary materials; future-build approval must not implicitly approve these.",
+                         "User instead approved a separate clean public source repository pernerch/botstudio-public. Initial public commit 289f7a485e33aa17e44b906854d9b1dd8e7dad39 has no private history or installers; anonymous source access and public visibility were verified. The original repository remains private.",
+                         "The real build-interpreter collector validated all 28 distributions and three model files with 109 notice/data entries and no missing license texts. Eighteen focused tests also passed from the exported public source, including real offline OCR and source-export privacy boundaries.",
+                         "Subsequent source acquisition downloaded and SHA256-checked 35 exact-version upstream archives, 573790005 bytes, covering runtime/build pins plus Qt/PySide, CPython, GEOS and OpenBLAS. dependency_sources.json records provenance, published checksums where available and scope limitations.",
+                         "Source-index schema 2 preserves 3269 upstream attribution, referenced license and build-document files byte-for-byte with original member mappings and short installed paths. All referenced Qt LicenseFile/LicenseFiles targets are included; optional/unshipped source features are not thereby declared bundled.",
+                         "The real rebuilt Windows bundle passed source/notice hashes, native exclusions, Studio/Watchdog self-tests, offline OCR, package roundtrip and exclusive variable inputs. No published 0.1.0.4 installer was modified. Acquisition and build success do not establish independent compatible-library replacement or complete binary Corresponding Source.",
+                         "Future release evidence includes unchanged dependency-source archives as a third ZIP, hash-bound alongside application source, installed notices and native files. Standalone source-and-notice ZIP creation is also supported without producing an installer.",
+                         "Current Beta 1 policy supersedes historic observations about optional rebuild checks: only mandatory license and source-delivery obligations are release blockers. Follow-ups remain open and do not enter the approval gate.",
+                         "Select GPL-3.0-only where offered for shipped Qt/PySide/Shiboken modules. Preserve module and third-party notices. Deliver official unmodified release sources, Qt release build/provisioning recipes and PySide build/wheel scripts; no private library patches were made.",
+                         "GEOS remains separately identifiable, dynamically linked LGPL-2.1 software under Shapely\u0027s notices. Deliver GEOS 3.13.1 sources and Shapely 2.1.2 upstream shared-library wheel build recipe; retain replacement and modification permissions.",
+                         "Mesa 11.2.2 license/copyright source material and the historical LLVM NCSA license supplement accompany Qt\u0027s opengl32sw.dll. Current LLVM Apache-only notices are not substituted for that older renderer.",
+                         "Sources for permissive ONNX Runtime, OpenBLAS and other native libraries are supplemental. Their unavailable external build inputs are not by themselves a source-disclosure blocker; their applicable notices must still be retained.",
+                         "Beta 1 local build maps and hash-verifies all 150 shipped native files with retained notices, 38 original source archives and 3307 source attribution/build documents. Actual GEOS runtime is 3.13.1; upstream Shapely 2.1.2 release.yml specifies GEOS_VERSION 3.13.1 and uses its included shared-library build recipe. Qt imageformat headers explicitly offer GPL-3.0-only.",
+                         "Required notice/source integration and distribution-gate regressions passed, as did real Studio/Watchdog 0.1.0.5 frozen self-tests including offline OCR and package roundtrip. Public publication still requires its clean-commit CI executable/installer/source verification and accompanying seven release assets."
                      ],
     "sources":  [
                     "https://doc.qt.io/qt-6.11/qtvirtualkeyboard-index.html",
@@ -19,18 +40,48 @@
                     "https://doc.qt.io/qt-6.11/lgpl.html",
                     "https://raw.githubusercontent.com/antlr/antlr4/4.9.3/LICENSE.txt",
                     "https://raw.githubusercontent.com/google/flatbuffers/v25.12.19/LICENSE",
-                    "https://raw.githubusercontent.com/RapidAI/RapidOCR/v3.9.2/LICENSE"
+                    "https://raw.githubusercontent.com/RapidAI/RapidOCR/v3.9.2/LICENSE",
+                    "https://www.gnu.org/licenses/gpl-3.0.html",
+                    "https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html",
+                    "https://wiki.qt.io/MesaLlvmpipe",
+                    "https://raw.githubusercontent.com/shapely/shapely/5fb639d1056888d135fe56bfaf750c9648addeec/ci/install_geos.cmd"
                 ],
+    "follow_ups":  [
+                       {
+                           "id":  "independent-qt-replacement-test",
+                           "status":  "open",
+                           "blocks_release":  false,
+                           "description":  "Rebuild a compatible Qt/PySide set independently and run the replacement smoke test. Useful verification, not a separately mandated license test or prerequisite under the selected GPL route."
+                       },
+                       {
+                           "id":  "bit-reproducible-native-builds",
+                           "status":  "open",
+                           "blocks_release":  false,
+                           "description":  "Compare independently rebuilt native libraries with vendor wheel bytes. Corresponding source and necessary build scripts are required for covered copyleft components; bit-identical output and an independent rebuild are not."
+                       },
+                       {
+                           "id":  "permissive-build-input-inventory",
+                           "status":  "open",
+                           "blocks_release":  false,
+                           "description":  "Optionally acquire external ONNX build submodules/downloads and scipy-openblas wheel-specific build inputs for deeper reproducibility. No blanket source-disclosure requirement is inferred for permissive code or GCC eligible runtime-exception combinations."
+                       },
+                       {
+                           "id":  "two-machine-two-account-game-acceptance",
+                           "status":  "open",
+                           "blocks_release":  false,
+                           "description":  "Perform real Client A/Client B package execution and republication with two GitHub accounts during Beta 1; automated package roundtrip is not real-game acceptance."
+                       }
+                   ],
     "blockers":  [
                      {
                          "id":  "missing-license-texts",
                          "resolved":  true,
-                         "description":  "Exact upstream ANTLR 4.9.3, Flatbuffers 25.12.19 and RapidOCR 3.9.2 texts are preserved under release/licenses and copied to upstream notice directories with hash/version checks. No root NOTICE was present in the latter two release trees. Native/Qt attributions remain a separate unresolved blocker; existing published installers are unchanged."
+                         "description":  "Exact upstream ANTLR 4.9.3, Flatbuffers 25.12.19 and RapidOCR 3.9.2 texts are preserved under release/licenses and copied to upstream notice directories with hash/version checks. No root NOTICE was present in the latter two release trees. Native/Qt notices are covered by their separate resolved checks; existing published installers are unchanged."
                      },
                      {
-                         "id":  "qt-lgpl-source-and-notices",
-                         "resolved":  false,
-                         "description":  "GPLv3/LGPLv3 texts, version-specific source locations and onedir replacement instructions are prepared. The unused QtPdf image plugin/Qt6Pdf.dll are excluded and verified absent. Complete attributions for the remaining Qt/PySide binaries, binary-matched source/build delivery and independent replacement validation remain unresolved."
+                         "id":  "qt-gpl-source-and-notices",
+                         "resolved":  true,
+                         "description":  "GPLv3 route selected for eligible Qt/PySide/Shiboken 6.11.2 components. Official qtbase/qtsvg/qtimageformats/PySide sources, original build scripts and Qt release build/provisioning configuration are delivered. Referenced license texts are preserved; no BotStudio modifications to these libraries. Optional independent rebuild/replacement is tracked separately."
                      },
                      {
                          "id":  "ocr-model-provenance",
@@ -39,13 +90,13 @@
                      },
                      {
                          "id":  "native-and-toolchain-notices",
-                         "resolved":  false,
-                         "description":  "OpenCV\u0027s unused FFmpeg backend is excluded and verified absent. Remaining OpenCV, Shapely/GEOS, ONNX Runtime, Pillow, NumPy, CPython, Microsoft VC/UCRT and PyInstaller native components still need a complete binary-to-notice/source map and source/build delivery review."
+                         "resolved":  true,
+                         "description":  "Require a complete native-file ownership/notice map and retain CPython, Microsoft runtime, Qt/Mesa/LLVM, NumPy/OpenBLAS, Pillow, ONNX, OpenCV, Shapely/GEOS and PyInstaller terms. GEOS sources/shared-library build recipe are supplied. Final assembled map verification is required; independent reproducible builds and permissive external source inputs are follow-ups, not blockers."
                      },
                      {
                          "id":  "application-license",
-                         "resolved":  false,
-                         "description":  "GPL-3.0-only chosen by Christian Perner; official LICENSE and application LICENSE-NOTICE.txt are present and verified in the private 0.1.0.3 bundle/installer. Dependency compatibility and exact complete Corresponding Source obligations must still be verified before public distribution. Existing 0.1.0.2 assets are unchanged; this item is not yet resolved."
+                         "resolved":  true,
+                         "description":  "GPL-3.0-only application terms are displayed in the installer and retained in the bundle. Public beta must originate from the clean public commit and carry that exact application source, build scripts, notices and copyleft dependency source archives beside the installer, without a deferred written source offer."
                      }
                  ]
 }

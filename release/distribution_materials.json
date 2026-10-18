@@ -3,6 +3,12 @@
   "observed_on": "2026-10-18",
   "license_files": [
     {
+      "file": "LLVM-3.6.2.txt",
+      "sha256": "e3bc36440fc927c62d5cc24efeefe225a14d4e34ffeb0c92e430625cce9ee444",
+      "source": "https://raw.githubusercontent.com/llvm/llvm-project/llvmorg-3.6.2/llvm/LICENSE.TXT",
+      "packages": {"pyside6-essentials": "6.11.2"}
+    },
+    {
       "file": "ANTLR-4.9.3.txt",
       "sha256": "b1b379fcaf3219593a4c433feb1b35c780bed23fafaae440b1ae2771a9521e3a",
       "source": "https://raw.githubusercontent.com/antlr/antlr4/4.9.3/LICENSE.txt",

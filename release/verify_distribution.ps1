@@ -7,7 +7,7 @@ try {
     Write-Output ("TEST START: distribution publication gate " + $started.ToString("o"))
     New-Item -ItemType Directory -Path (Join-Path $temporary "release") -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $temporary "services") -Force | Out-Null
-    foreach ($file in @("assert_distribution_ready.ps1", "assert_release_access.ps1", "get_release_version.ps1", "requirements-runtime.txt", "distribution_materials.json")) {
+    foreach ($file in @("assert_distribution_ready.ps1", "assert_release_access.ps1", "get_release_version.ps1", "requirements-runtime.txt", "distribution_materials.json", "dependency_sources.json")) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination (Join-Path $temporary "release")
     }
     $root = Split-Path -Parent $PSScriptRoot
@@ -77,10 +77,12 @@ try {
     $review.status = "approved"
     $review.approved_runtime_manifest_sha256 = (Get-FileHash -LiteralPath (Join-Path $temporary "release\requirements-runtime.txt") -Algorithm SHA256).Hash
     $review.approved_materials_sha256 = (Get-FileHash -LiteralPath (Join-Path $temporary "release\distribution_materials.json") -Algorithm SHA256).Hash
+    $review.approved_dependency_sources_sha256 = (Get-FileHash -LiteralPath (Join-Path $temporary "release\dependency_sources.json") -Algorithm SHA256).Hash
     $review.approved_application_version = & (Join-Path $temporary "release\get_release_version.ps1")
     $review.blockers = @([pscustomobject]@{ id = "test-fixture"; resolved = $false })
     Assert-Gate $false
     $review.blockers[0].resolved = $true
+    $review.follow_ups = @([pscustomobject]@{ id = "optional-replacement-test"; status = "open"; blocks_release = $false })
     Assert-Gate $true
     $previousRepository = $env:GH_REPO
     try {
@@ -103,6 +105,9 @@ try {
     $review.approved_materials_sha256 = $null
     Assert-Gate $false
     $review.approved_materials_sha256 = (Get-FileHash -LiteralPath (Join-Path $temporary "release\distribution_materials.json") -Algorithm SHA256).Hash
+    $review.approved_dependency_sources_sha256 = $null
+    Assert-Gate $false
+    $review.approved_dependency_sources_sha256 = (Get-FileHash -LiteralPath (Join-Path $temporary "release\dependency_sources.json") -Algorithm SHA256).Hash
     Add-Content -LiteralPath (Join-Path $temporary "release\requirements-runtime.txt") -Value "# Changed after review"
     Assert-Gate $false
 } catch {

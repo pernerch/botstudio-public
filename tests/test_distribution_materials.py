@@ -9,13 +9,31 @@ from unittest.mock import patch
 import zipfile
 
 from release.collect_notices import distribution_materials, pinned_packages
-from release.native_distribution import exclude_unused_native_entries
+from release.native_distribution import exclude_unused_native_entries, native_owner
 
 
 PROJECT = Path(__file__).resolve().parents[1]
 
 
 class NativeDistributionTests(unittest.TestCase):
+    def test_native_ownership_covers_libraries_without_accepting_unknown_native_files(self):
+        cases = {
+            "BotStudio.exe": "botstudio",
+            "_internal/PySide6/Qt6Core.dll": "pyside6-essentials",
+            "_internal/shapely.libs/geos.dll": "shapely",
+            "_internal/numpy.libs/libscipy_openblas.dll": "numpy",
+            "_internal/PIL/_imaging.pyd": "pillow",
+            "_internal/python314.dll": "cpython",
+            "_internal/_ssl.pyd": "cpython",
+            "_internal/ucrtbase.dll": "microsoft-runtime",
+        }
+        for path, owner in cases.items():
+            with self.subTest(path=path):
+                self.assertEqual(owner, native_owner(path))
+        for path in ("unexpected.dll", "_internal/unknown.dll", "_internal/unknown.pyd"):
+            with self.assertRaisesRegex(ValueError, "Unmapped native"):
+                native_owner(path)
+
     def test_filters_only_unused_pdf_and_ffmpeg_binaries(self):
         entries = [
             ("PySide6/plugins/imageformats/qpdf.dll", "qpdf.dll", "BINARY"),
@@ -69,7 +87,7 @@ class DistributionMaterialsTests(unittest.TestCase):
         result = distribution_materials(self.requirements)
         self.assertEqual("Apache-2.0", result["models"]["license"])
         self.assertEqual(3, len(result["models"]["files"]))
-        self.assertEqual(5, len(result["license_files"]))
+        self.assertEqual(6, len(result["license_files"]))
 
     def test_changed_license_is_rejected(self):
         path = self.release / "licenses" / self.manifest["license_files"][0]["file"]
@@ -126,6 +144,10 @@ class SourceEvidenceTests(unittest.TestCase):
         for name in ("prepare_source.ps1", "prepare_public_source.ps1", "get_release_version.ps1",
                      "PUBLIC_README.md", "distribution_review.json"):
             shutil.copy(PROJECT / "release" / name, self.release)
+        review_path = self.release / "distribution_review.json"
+        review = json.loads(review_path.read_text(encoding="utf-8"))
+        review["status"] = "blocked"
+        review_path.write_text(json.dumps(review), encoding="utf-8")
         (self.root / "services").mkdir()
         (self.root / "services" / "application_info.py").write_text(
             'APP_VERSION = "0.1.0.3"\n', encoding="utf-8"
@@ -145,9 +167,34 @@ class SourceEvidenceTests(unittest.TestCase):
         }), encoding="utf-8")
         notices = self.root / "dist" / "BotStudio" / "_internal" / "third_party"
         notices.mkdir(parents=True)
+        sources = self.root / "build" / "dependency-sources"
+        sources.mkdir(parents=True)
+        source_payload = b"Synthetic upstream source archive, never executed"
+        (sources / "synthetic.tar.gz").write_bytes(source_payload)
+        source_lock = {
+            "schema_version": 1,
+            "archives": [{
+                "id": "synthetic", "filename": "synthetic.tar.gz",
+                "sha256": hashlib.sha256(source_payload).hexdigest(),
+                "size_bytes": len(source_payload),
+            }],
+        }
+        lock_bytes = json.dumps(source_lock).encode("utf-8")
+        (self.release / "dependency_sources.json").write_bytes(lock_bytes)
+        (self.release / "DISTRIBUTION.md").write_text("Synthetic source evidence", encoding="utf-8")
+        lock_hash = hashlib.sha256(lock_bytes).hexdigest()
+        (notices / "source-index.json").write_text(json.dumps({
+            "schema_version": 2, "source_lock_sha256": lock_hash,
+            "complete_corresponding_source_approved": False,
+            "archives": source_lock["archives"],
+        }), encoding="utf-8")
         (notices / "inventory.json").write_text(json.dumps({
             "schema_version": 1, "missing_notice_packages": [],
+            "dependency_sources": {"source_lock_sha256": lock_hash, "archive_count": 1},
         }), encoding="utf-8")
+        self.git("add", "release")
+        self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                 "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "source lock fixture")
         (notices.parent / "synthetic.dll").write_bytes(b"synthetic native inventory entry")
         (self.root / "private-untracked.txt").write_text("not source", encoding="utf-8")
 
@@ -170,7 +217,7 @@ class SourceEvidenceTests(unittest.TestCase):
         manifest = json.loads((self.output / "SOURCE-MANIFEST.json").read_text(encoding="utf-8"))
         self.assertEqual(self.git("rev-parse", "HEAD"), manifest["commit"])
         self.assertFalse(manifest["complete_corresponding_source_approved"])
-        self.assertEqual(2, len(manifest["artifacts"]))
+        self.assertEqual(3, len(manifest["artifacts"]))
         self.assertEqual("_internal/synthetic.dll", manifest["native_files"][0]["path"])
         for item in manifest["artifacts"]:
             payload = (self.output / item["file"]).read_bytes()
@@ -180,6 +227,11 @@ class SourceEvidenceTests(unittest.TestCase):
             self.assertIn("BotStudio-0.1.0.3/services/application_info.py", archive.namelist())
             self.assertFalse(any("private-untracked" in name or "/dist/" in name
                                  for name in archive.namelist()))
+        with zipfile.ZipFile(self.output / "BotStudio-Dependency-Sources-0.1.0.3.zip") as archive:
+            self.assertEqual(
+                b"Synthetic upstream source archive, never executed",
+                archive.read("sources/synthetic.tar.gz"),
+            )
         repeated = self.prepare()
         self.assertNotEqual(0, repeated.returncode)
         self.assertIn("Refusing to replace source evidence", repeated.stdout + repeated.stderr)
@@ -202,6 +254,13 @@ class SourceEvidenceTests(unittest.TestCase):
         self.assertNotEqual(0, result.returncode)
         self.assertIn("omits tracked content", result.stdout + result.stderr)
         self.assertFalse((self.output / "BotStudio-Application-Source-0.1.0.3.zip").exists())
+
+    def test_modified_dependency_source_is_rejected_before_publication(self):
+        (self.root / "build" / "dependency-sources" / "synthetic.tar.gz").write_bytes(b"modified")
+        result = self.prepare()
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("Dependency source hash mismatch", result.stdout + result.stderr)
+        self.assertFalse((self.output / "SOURCE-MANIFEST.json").exists())
 
     def test_public_snapshot_excludes_private_history_and_user_stores(self):
         for directory in ("brain", "config", "data", "profiles", "logs", "backups"):
@@ -234,6 +293,16 @@ class SourceEvidenceTests(unittest.TestCase):
         self.assertEqual("blocked", review["status"])
         self.assertIsNone(review["approved_application_version"])
         self.assertNotIn("39118042837", json.dumps(review["observations"]))
+
+    def test_binary_export_cannot_preserve_unchecked_approval(self):
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+             "-File", str(self.release / "prepare_public_source.ps1"),
+             "-Destination", str(self.root / "unchecked-export"), "-ApprovedBinaryRelease"],
+            capture_output=True, text=True, timeout=30,
+        )
+        self.assertNotEqual(0, result.returncode)
+        self.assertFalse((self.root / "unchecked-export").exists())
 
     def test_upstream_license_bytes_survive_windows_line_ending_checkout(self):
         shutil.copy(PROJECT / ".gitattributes", self.root)

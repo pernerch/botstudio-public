@@ -46,6 +46,10 @@ OpenCV for still-image processing and has no video capture or encoding path.
 reintroduces them. The image-preview and offline-OCR executable self-tests
 remain required after this packaging change.
 
+For the shipped eligible Qt/PySide/Shiboken modules this GPL-3.0-only Studio
+release selects the offered GPLv3 option. Embedded permissive third-party
+components keep their own terms; this does not relicense them. Qt module
+sources and all required license/attribution texts accompany the installer.
 The GPLv3 and LGPLv3 texts are supplied in each Qt/PySide package's `upstream`
 directory. These texts alone do not replace the modules' copyright and
 third-party attributions. The wheel's commercial-license placeholder is not
@@ -62,8 +66,79 @@ remain in the bundle:
 - [Qt third-party attribution documentation](https://doc.qt.io/qt-6/licenses-used-in-qt.html)
 - [Qt for Python license documentation](https://doc.qt.io/qtforpython-6/licenses.html)
 
-Source locations are navigation aids, not a claim that a binary-matched
-complete source delivery has already been assembled and verified.
+The archives are now actually acquired, not merely linked. The source lock
+`dependency_sources.json` records 38 version/commit-locked archives
+covering the runtime/build pins plus CPython, Qt modules, GEOS and OpenBLAS.
+Qt/PySide downloads were checked against Qt's published SHA-256 values;
+PyPI sdists use PyPI's published digests. Other official HTTPS snapshots are
+explicitly identified as locally hashed downloads, not independently signed
+publisher checksums. Matching a version is not proof of matching wheel patches.
+
+### Acquired sources, license texts and attribution metadata
+
+Normal Windows builds run the following automatically before PyInstaller:
+
+```powershell
+.\.venv\Scripts\python.exe -m release.prepare_dependency_sources
+```
+
+The sources remain under `build/dependency-sources`; hash-checked extracted
+materials live under `build/dependency-materials`. Source-index schema 2 maps
+verbatim attribution, referenced license and build-document files to
+their original archive members. Installed copies use short, hash-prefixed
+names under `_internal/third_party/source-notices` to avoid Windows MAX_PATH.
+The original hierarchy and source bytes remain unchanged inside the archives.
+Qt `qt_attribution.json` and every referenced `LicenseFile`/`LicenseFiles` text
+are included. PySide's Windows source-build instructions are included too.
+Missing references, corrupt archives or changed prepared texts fail the build.
+This conservative collection includes notices for optional/unshipped source
+features; it is not a claim that every such feature is in the executable.
+
+A standalone source-and-notice delivery can be produced without an installer:
+
+```powershell
+.\.venv\Scripts\python.exe -m release.prepare_dependency_sources `
+  --archive .\build\BotStudio-Upstream-Sources-and-Notices-0.1.0.5.zip
+```
+
+Existing destinations are never overwritten. `--resolve` is a separate,
+explicit maintainer operation to update the reviewed lock, not part of builds.
+The normal build never substitutes a newer upstream version.
+
+### Mandatory obligations versus non-blocking follow-ups
+
+The release gate's `blockers` contain only applicable license obligations:
+retain copyright/license/notices, comply with model and runtime redistribution
+terms, provide the conveyed GPL application source and corresponding copyleft
+library sources including required build/installation scripts, and impose no
+prohibited modification/relinking restrictions. Public source and all three
+source/notice ZIPs are offered at no extra charge beside the installer under
+GPLv3 section 6(d); no deferred multi-year written offer is used.
+
+Official unmodified Qt/PySide release sources are accompanied by their build
+scripts and Qt's release build/provisioning configuration from the immutable
+Qt supermodule commit in the lock. Only the shipped module source tarballs
+are claimed: gitlinks for unrelated Qt modules are not silently claimed as
+delivered source. Shapely's exact upstream Windows wheel recipe builds GEOS
+3.13.1 from the provided unmodified source with `BUILD_SHARED_LIBS=ON`;
+the recipe, Shapely sources and GEOS sources are all included. No private
+BotStudio patches to Qt, PySide or GEOS were made.
+
+The following remain **open, non-blocking** in the review's `follow_ups`:
+
+- Independently rebuild and exercise a compatible Qt/PySide replacement.
+- Explore bit-for-bit native build reproducibility beyond source delivery.
+- Acquire external ONNX build submodules and scipy-openblas wheel build inputs
+  for reproducibility. Their permissive licenses do not generally require
+  source disclosure; retain the actual applicable notices and GCC runtime
+  exception terms instead of inferring a blanket copyleft source duty.
+- Complete real two-machine/two-account game acceptance during Beta 1.
+
+An independent rebuild, a bit-identical result or a separately recorded
+replacement test is not itself a license requirement. This does not waive
+actual corresponding-source/build-script or LGPL replacement obligations.
+`distribution_review.json` keeps the two categories separate and binds final
+approval to this application version, runtime pins, materials and source lock.
 
 ### Replacing dynamically loaded Qt/PySide libraries
 
@@ -81,8 +156,17 @@ and the corresponding Watchdog self-test with another new empty path.
 Never point self-tests at real user data. The normal checksum checks test the
 original release; they are not an anti-modification restriction. Reverse
 engineering to debug modifications to LGPL-covered components is not
-prohibited by BotStudio. This replacement procedure still needs validation
-with an independently rebuilt compatible Qt/PySide set.
+prohibited by BotStudio. This optional verification procedure remains open as
+`independent-qt-replacement-test`; it is not a publication blocker.
+
+GEOS remains LGPL-2.1-covered and dynamically loaded from the Shapely DLL
+directory (`_internal/shapely.libs` or the wheel's corresponding Shapely
+directory). Keep the original installation, replace GEOS and its C API DLL as a
+compatible pair in a writable copy, then run the same isolated smoke tests.
+GEOS sources, license and its upstream Windows shared-library build recipe
+accompany this distribution. Users may modify and replace it; no technical
+checksum lock prevents a modified copy from running. A recorded independent
+replacement test is optional; the actual replacement mechanism is not.
 
 ## Native components and toolchain
 
@@ -93,22 +177,31 @@ PyInstaller license/bootloader exception, NumPy's bundled native-library
 licenses, ONNX Runtime `ThirdPartyNotices.txt`, OpenCV `LICENSE-3RD-PARTY.txt`,
 Pillow's native-library notices and Shapely/GEOS notices.
 
-`prepare_source.ps1` emits a checksum-bound native-file inventory from the
-actual assembled bundle. An inventory is not a license compatibility verdict.
-Unmapped DLLs and missing attributions must be resolved before approval.
+`native-licenses.json` maps every shipped EXE/DLL/PYD to its component owner,
+retained notice files and relevant source/attribution groups. Bundle verification
+checks coverage and file hashes; unknown files or missing notices fail.
+`prepare_source.ps1` also binds the native-file inventory to the installer.
+Mesa 11.2.2 license/copyright material and the historical LLVM NCSA license
+are included for Qt's software renderer (not a modern Apache-only substitute).
 
 ## Source delivery and release visibility
 
 The release workflow prepares an application-source ZIP from the exact Git
-commit (never from the working directory), a ZIP of installed notices and
-`SOURCE-MANIFEST.json` binding their hashes to the installer and native files.
+commit (never from the working directory), a ZIP of installed notices, a
+`BotStudio-Dependency-Sources-<version>.zip` containing the unchanged acquired
+source archives and index, and `SOURCE-MANIFEST.json` binding all three ZIP
+hashes and the source-lock hash to the installer and native files.
 This preserves build scripts, exact dependency pins and the application
 source. It is deliberately called **application source**, not automatically
 the complete Corresponding Source of all third-party libraries.
+The acquisition index's false approval flag only means acquisition itself
+does not approve a release. `SOURCE-MANIFEST.json` records the final
+version/hash-bound release review result; the adjacent application and
+copyleft library sources/build recipes together provide the required delivery.
 
-Before public binary distribution, assemble and verify the additional
-copyleft dependency source/build material, complete native/Qt attributions,
-and satisfy equivalent source access for binary recipients. Do not make a
+Before public binary distribution, satisfy the mandatory obligations above
+and the version-bound review gate. Private redistribution and beta status
+do not exempt redistribution obligations. Do not make a
 written multi-year source offer without a real process to fulfill it.
 
 Changing a repository from private to public exposes **all its existing

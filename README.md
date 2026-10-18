@@ -17,17 +17,28 @@ modes clears the previous value. Existing `$name` references open in variable
 mode; entering a leading `$` also switches to variable mode to match runtime
 semantics. Output names and Variable-block targets remain variable-only.
 
-## Source publication, not a binary release
+## Beta 1 for Windows
 
 This repository starts with a clean snapshot of the current application
 source. It does not contain the private development history, credentials,
 profiles, game accounts, user packages, logs, backups or old test installers.
 
-No public installer is published yet. Complete Qt/native attributions and
-copyleft dependency source delivery are still being prepared. See
+Beta 1 uses version **0.1.0.5** and is published as a GitHub **prerelease**,
+not a stable release. Download the installer and its source/notice companions
+from [Releases](https://github.com/pernerch/botstudio-public/releases).
+Keep backups and use separate test data. Real two-machine/two-account game
+acceptance is an open beta task.
+
+Thirty-eight hash-locked upstream archives include copyleft library sources,
+Qt release build configuration and Shapely's shared GEOS build recipe.
+Windows builds retain the extracted license/attribution texts, a complete
+native-file notice map and a separate dependency-source ZIP beside exact
+application source and installed notices. Independent library rebuild and
+replacement tests remain **non-blocking open follow-ups**, not additional
+license prerequisites. See
 [distribution materials](release/DISTRIBUTION.md) and the
 [distribution review](release/distribution_review.json). Publishing the
-application source does not approve distribution of its dependencies.
+application source alone does not substitute for these license obligations.
 
 ## Run from source
 

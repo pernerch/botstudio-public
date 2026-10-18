@@ -24,11 +24,64 @@ foreach ($name in @("LICENSE", "LICENSE-NOTICE.txt")) {
     }
 }
 $notices = Join-Path $bundle "_internal\third_party"
+$nativeMap = Get-Content -LiteralPath (Join-Path $notices "native-licenses.json") -Raw | ConvertFrom-Json
+$nativeFiles = @(Get-ChildItem -LiteralPath $bundle -Recurse -File |
+    Where-Object { $_.Extension -in @(".exe", ".dll", ".pyd") } |
+    ForEach-Object { $_.FullName.Substring($bundle.Length + 1).Replace("\", "/") })
+if ($nativeMap.schema_version -ne 1 -or -not $nativeMap.files -or
+    @($nativeMap.unmapped_files).Count -ne 0 -or
+    @(Compare-Object @($nativeMap.files.path) $nativeFiles).Count -ne 0) {
+    throw "Native license map does not cover the assembled bundle."
+}
+foreach ($file in $nativeMap.files) {
+    $path = Join-Path $bundle $file.path
+    if (-not $file.owner -or -not $file.notice_files -or
+        (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $file.sha256 -or
+        (Get-Item -LiteralPath $path).Length -ne $file.size_bytes) {
+        throw "Native license map identity mismatch."
+    }
+    foreach ($notice in $file.notice_files) {
+        if (-not (Test-Path -LiteralPath (Join-Path $notices $notice) -PathType Leaf)) {
+            throw "Missing mapped native notice: $notice"
+        }
+    }
+}
 $inventory = Get-Content -LiteralPath (Join-Path $notices "inventory.json") -Raw | ConvertFrom-Json
 if ($inventory.schema_version -ne 1 -or $inventory.status -cne "review_required" -or
     -not $inventory.packages -or @($inventory.missing_notice_packages).Count -ne 0 -or
     -not (Test-Path -LiteralPath (Join-Path $notices "Python-LICENSE.txt"))) {
     throw "Bundled third-party inventory or CPython license is missing."
+}
+$sourceLockPath = Join-Path $notices "dependency_sources.json"
+$sourceLockHash = (Get-FileHash -LiteralPath $sourceLockPath -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($sourceLockHash -cne
+    (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot "dependency_sources.json") -Algorithm SHA256).Hash.ToLowerInvariant() -or
+    $inventory.dependency_sources.source_lock_sha256 -cne $sourceLockHash) {
+    throw "Bundled dependency source lock differs from the release source."
+}
+$sourceIndex = Get-Content -LiteralPath (Join-Path $notices "source-index.json") -Raw | ConvertFrom-Json
+$sourceLock = Get-Content -LiteralPath $sourceLockPath -Raw | ConvertFrom-Json
+if ($sourceIndex.schema_version -ne 2 -or $sourceIndex.source_lock_sha256 -cne $sourceLockHash -or
+    $sourceIndex.complete_corresponding_source_approved -ne $false -or
+    $sourceIndex.archives.Count -ne $sourceLock.archives.Count -or
+    $inventory.dependency_sources.archive_count -ne $sourceLock.archives.Count) {
+    throw "Bundled dependency source index is incomplete or has an invalid approval claim."
+}
+foreach ($archive in $sourceIndex.archives) {
+    $expected = @($sourceLock.archives | Where-Object { $_.id -ceq $archive.id })
+    if ($expected.Count -ne 1 -or $expected[0].sha256 -cne $archive.sha256 -or
+        $expected[0].filename -cne $archive.filename -or -not $archive.materials) {
+        throw "Bundled dependency source identity mismatch."
+    }
+    foreach ($material in $archive.materials) {
+        if ($material.path -match '(^|/)\.\.(/|$)|[:\\]' -or $material.path.StartsWith("/")) {
+            throw "Unsafe source notice path."
+        }
+        $path = Join-Path (Join-Path $notices "source-notices") $material.path
+        if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $material.sha256) {
+            throw "Bundled upstream attribution mismatch: $($material.path)"
+        }
+    }
 }
 foreach ($package in $inventory.packages) {
     if (-not $package.notice_files -or

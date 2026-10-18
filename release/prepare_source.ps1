@@ -23,14 +23,50 @@ $sourceName = "BotStudio-Application-Source-$version.zip"
 $source = Join-Path $output $sourceName
 $noticesName = "BotStudio-Notices-$version.zip"
 $notices = Join-Path $output $noticesName
+$dependencyName = "BotStudio-Dependency-Sources-$version.zip"
+$dependencyArchive = Join-Path $output $dependencyName
 $manifestPath = Join-Path $output "SOURCE-MANIFEST.json"
-foreach ($target in @($source, $notices, $manifestPath)) {
+foreach ($target in @($source, $notices, $dependencyArchive, $manifestPath)) {
     if (Test-Path -LiteralPath $target) { throw "Refusing to replace source evidence: $target" }
 }
 $noticeRoot = Join-Path $root "dist\BotStudio\_internal\third_party"
 $inventory = Get-Content -LiteralPath (Join-Path $noticeRoot "inventory.json") -Raw | ConvertFrom-Json
 if ($inventory.schema_version -ne 1 -or @($inventory.missing_notice_packages).Count -ne 0) {
     throw "Missing license text in build inventory."
+}
+$lockPath = Join-Path $PSScriptRoot "dependency_sources.json"
+$lockHash = (Get-FileHash -LiteralPath $lockPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$sourceIndexPath = Join-Path $noticeRoot "source-index.json"
+$sourceIndex = Get-Content -LiteralPath $sourceIndexPath -Raw | ConvertFrom-Json
+if ($sourceIndex.schema_version -ne 2 -or $sourceIndex.source_lock_sha256 -cne $lockHash -or
+    $sourceIndex.complete_corresponding_source_approved -ne $false -or
+    $inventory.dependency_sources.source_lock_sha256 -cne $lockHash -or
+    $inventory.dependency_sources.archive_count -ne $sourceIndex.archives.Count) {
+    throw "Bundled dependency source evidence does not match the release lock."
+}
+$sourceLock = Get-Content -LiteralPath $lockPath -Raw | ConvertFrom-Json
+$review = Get-Content -LiteralPath (Join-Path $PSScriptRoot "distribution_review.json") -Raw | ConvertFrom-Json
+$sourceApproval = $false
+if ($review.status -ceq "approved") {
+    & (Join-Path $PSScriptRoot "assert_distribution_ready.ps1")
+    $sourceApproval = $true
+}
+if ($sourceIndex.archives.Count -ne $sourceLock.archives.Count) {
+    throw "Dependency source coverage mismatch."
+}
+foreach ($item in $sourceLock.archives) {
+    $indexed = @($sourceIndex.archives | Where-Object { $_.id -ceq $item.id })
+    if ($indexed.Count -ne 1 -or $indexed[0].filename -cne $item.filename -or
+        $indexed[0].sha256 -cne $item.sha256 -or $indexed[0].size_bytes -ne $item.size_bytes -or
+        $indexed[0].version -cne $item.version) {
+        throw "Dependency source index identity mismatch: $($item.id)"
+    }
+    if ($item.filename -cnotmatch '^[A-Za-z0-9_.+-]+$') { throw "Unsafe dependency source filename." }
+    $path = Join-Path (Join-Path $root "build\dependency-sources") $item.filename
+    if ((Get-Item -LiteralPath $path).Length -ne $item.size_bytes -or
+        (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $item.sha256) {
+        throw "Dependency source hash mismatch: $($item.filename)"
+    }
 }
 try {
     git -C $root archive --format=zip "--output=$source" "--prefix=BotStudio-$version/" $commit
@@ -48,6 +84,22 @@ try {
         $archive.Dispose()
     }
     [System.IO.Compression.ZipFile]::CreateFromDirectory($noticeRoot, $notices)
+    $dependencyZip = [System.IO.Compression.ZipFile]::Open($dependencyArchive, [System.IO.Compression.ZipArchiveMode]::Create)
+    try {
+        foreach ($item in $sourceLock.archives) {
+            $path = Join-Path (Join-Path $root "build\dependency-sources") $item.filename
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                $dependencyZip, $path, ("sources/" + $item.filename), [System.IO.Compression.CompressionLevel]::NoCompression
+            ) | Out-Null
+        }
+        foreach ($path in @($sourceIndexPath, $lockPath, (Join-Path $PSScriptRoot "DISTRIBUTION.md"))) {
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                $dependencyZip, $path, [System.IO.Path]::GetFileName($path)
+            ) | Out-Null
+        }
+    } finally {
+        $dependencyZip.Dispose()
+    }
     $bundle = (Resolve-Path -LiteralPath (Join-Path $root "dist\BotStudio")).Path
     $nativeFiles = @(Get-ChildItem -LiteralPath $bundle -Recurse -File |
         Where-Object { $_.Extension -in @(".dll", ".pyd", ".exe") } |
@@ -64,8 +116,8 @@ try {
         version = $version
         tag = $metadata.tag
         commit = $commit
-        scope = "application-source-and-distribution-evidence"
-        complete_corresponding_source_approved = $false
+        scope = "application-upstream-sources-and-distribution-evidence"
+        complete_corresponding_source_approved = $sourceApproval
         installer = $metadata.installer
         installer_sha256 = $installerHash
         artifacts = @(
@@ -78,14 +130,20 @@ try {
                 file = $noticesName
                 sha256 = (Get-FileHash -LiteralPath $notices -Algorithm SHA256).Hash.ToLowerInvariant()
                 size_bytes = (Get-Item -LiteralPath $notices).Length
+            },
+            [ordered]@{
+                file = $dependencyName
+                sha256 = (Get-FileHash -LiteralPath $dependencyArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+                size_bytes = (Get-Item -LiteralPath $dependencyArchive).Length
             }
         )
+        dependency_source_lock_sha256 = $lockHash
         native_files = $nativeFiles
     }
     $utf8 = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($manifestPath, (($manifest | ConvertTo-Json -Depth 8) + "`n"), $utf8)
 } catch {
-    foreach ($target in @($source, $notices, $manifestPath)) {
+    foreach ($target in @($source, $notices, $dependencyArchive, $manifestPath)) {
         if (Test-Path -LiteralPath $target -PathType Leaf) { Remove-Item -LiteralPath $target -Force }
     }
     throw

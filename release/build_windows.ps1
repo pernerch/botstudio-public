@@ -18,7 +18,21 @@ if (-not (Test-Path -LiteralPath $buildPython)) {
 if ($LASTEXITCODE -ne 0) { throw "Release dependency installation failed." }
 & $buildPython -m pip check
 if ($LASTEXITCODE -ne 0) { throw "Release dependencies are incompatible." }
+Push-Location $root
+try {
+    & $buildPython -m release.prepare_dependency_sources
+    if ($LASTEXITCODE -ne 0) { throw "Pinned dependency source acquisition failed." }
+} finally {
+    Pop-Location
+}
 & $buildPython -m PyInstaller --clean --noconfirm --distpath $OutputDirectory --workpath (Join-Path $root "build\pyinstaller") (Join-Path $PSScriptRoot "botstudio.spec")
 if ($LASTEXITCODE -ne 0) { throw "Windows executable build failed." }
+Push-Location $root
+try {
+    & $buildPython -m release.native_distribution --bundle (Join-Path $OutputDirectory "BotStudio")
+    if ($LASTEXITCODE -ne 0) { throw "Native license mapping failed." }
+} finally {
+    Pop-Location
+}
 Write-Output "BUILD RESULT: SUCCESS"
 Write-Output (Join-Path $OutputDirectory "BotStudio")

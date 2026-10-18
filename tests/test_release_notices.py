@@ -24,6 +24,9 @@ class ReleaseNoticesTests(unittest.TestCase):
             "models": {"distribution": "example", "version": "1.0", "files": []},
         }), encoding="utf-8")
         (self.root / "DISTRIBUTION.md").write_text("Synthetic test evidence\n", encoding="utf-8")
+        (self.root / "distribution_review.json").write_text(
+            '{"follow_ups":[{"id":"optional-test","blocks_release":false}]}', encoding="utf-8",
+        )
         self.license = self.root / "example.dist-info" / "licenses" / "LICENSE"
         self.license.parent.mkdir(parents=True)
         self.license.write_bytes(b"Test notice\n")
@@ -41,6 +44,9 @@ class ReleaseNoticesTests(unittest.TestCase):
             patch("importlib.metadata.distribution", return_value=self.distribution),
             patch("importlib.metadata.version", return_value="1.0"),
             patch("sys.base_prefix", str(self.root)),
+            patch("release.prepare_dependency_sources.bundled_materials", return_value=([], {
+                "source_lock_sha256": "0" * 64, "archives": [],
+            })),
         ]
         for mock in self.patches:
             mock.start()
@@ -60,7 +66,11 @@ class ReleaseNoticesTests(unittest.TestCase):
         self.assertEqual(b"Test notice\n", (output / "example" / notice["path"]).read_bytes())
         self.assertIn((str(output / "Python-LICENSE.txt"), "third_party"), datas)
         self.assertTrue(all(p["review_required"] for p in report["packages"]))
-        self.assertIn("NOT distribution approval", (output / "THIRD_PARTY_NOTICES.txt").read_text())
+        self.assertIn("not an independent legal approval", (output / "THIRD_PARTY_NOTICES.txt").read_text())
+        self.assertEqual(
+            (self.root / "distribution_review.json").read_bytes(),
+            (output / "distribution_review.json").read_bytes(),
+        )
 
     def test_missing_wheel_notice_blocks_collection_instead_of_inventing_text(self):
         self.distribution.files = []
