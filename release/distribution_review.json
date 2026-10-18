@@ -1,0 +1,51 @@
+{
+    "schema_version":  1,
+    "status":  "blocked",
+    "reviewed_runtime_manifest":  "requirements-runtime.txt",
+    "approved_runtime_manifest_sha256":  null,
+    "approved_materials_sha256":  null,
+    "approved_application_version":  null,
+    "evidence_date":  "2026-10-18",
+    "observations":  [
+                         "Clean public application source snapshot; private development history and test binaries are excluded.",
+                         "GPL-3.0-only applies to the applicable BotStudio material.",
+                         "Version/hash-bound upstream license supplements and model provenance are supplied.",
+                         "Complete Qt/native attribution and copyleft dependency source delivery remain unresolved.",
+                         "This source publication does not approve public installer distribution."
+                     ],
+    "sources":  [
+                    "https://doc.qt.io/qt-6.11/qtvirtualkeyboard-index.html",
+                    "https://doc.qt.io/qt-6.11/qtpdf-index.html",
+                    "https://doc.qt.io/qt-6.11/lgpl.html",
+                    "https://raw.githubusercontent.com/antlr/antlr4/4.9.3/LICENSE.txt",
+                    "https://raw.githubusercontent.com/google/flatbuffers/v25.12.19/LICENSE",
+                    "https://raw.githubusercontent.com/RapidAI/RapidOCR/v3.9.2/LICENSE"
+                ],
+    "blockers":  [
+                     {
+                         "id":  "missing-license-texts",
+                         "resolved":  true,
+                         "description":  "Exact upstream ANTLR 4.9.3, Flatbuffers 25.12.19 and RapidOCR 3.9.2 texts are preserved under release/licenses and copied to upstream notice directories with hash/version checks. No root NOTICE was present in the latter two release trees. Native/Qt attributions remain a separate unresolved blocker; existing published installers are unchanged."
+                     },
+                     {
+                         "id":  "qt-lgpl-source-and-notices",
+                         "resolved":  false,
+                         "description":  "GPLv3/LGPLv3 texts, version-specific source locations and onedir replacement instructions are prepared. Complete Qt third-party attributions (including QtPdf/PDFium), binary-matched source/build delivery and independent replacement validation remain unresolved."
+                     },
+                     {
+                         "id":  "ocr-model-provenance",
+                         "resolved":  true,
+                         "description":  "RapidAI\u0027s model-host Apache License 2.0 declaration, v3.9.2 file API records, original file revisions and matching SHA-256/size for all three shipped models are recorded in distribution_materials.json. Collector and bundle verification reject changed or extra models. This resolves model-host redistribution evidence, not a warranty of training-data or patent clearance."
+                     },
+                     {
+                         "id":  "native-and-toolchain-notices",
+                         "resolved":  false,
+                         "description":  "Review native dependencies, CPython/VC runtime, PyInstaller bootloader exception and bundled assets for redistribution requirements."
+                     },
+                     {
+                         "id":  "application-license",
+                         "resolved":  false,
+                         "description":  "GPL-3.0-only chosen by Christian Perner; official LICENSE and application LICENSE-NOTICE.txt are present and verified in the private 0.1.0.3 bundle/installer. Dependency compatibility and exact complete Corresponding Source obligations must still be verified before public distribution. Existing 0.1.0.2 assets are unchanged; this item is not yet resolved."
+                     }
+                 ]
+}

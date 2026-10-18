@@ -1,0 +1,28 @@
+{
+    "font_family": "Segoe UI",
+    "font_size": 11,
+
+    "background_color": "#1e2228",
+    "panel_color": "#252a33",
+    "control_color": "#303744",
+
+    "text_color": "#e8e8e8",
+    "border_color": "#505050",
+
+    "accent_color": "#5c92ff",
+
+    "success_color": "#36c275",
+    "warning_color": "#ffb84d",
+    "error_color": "#ff6b6b",
+
+    "border_radius": 6,
+    "border_width": 1,
+
+    "padding": 6,
+    "margin": 4,
+
+    "control_height": 32,
+
+    "scrollbar_width": 12,
+    "splitter_width": 4
+}

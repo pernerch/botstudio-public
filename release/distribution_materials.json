@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "observed_on": "2026-10-18",
+  "license_files": [
+    {
+      "file": "ANTLR-4.9.3.txt",
+      "sha256": "b1b379fcaf3219593a4c433feb1b35c780bed23fafaae440b1ae2771a9521e3a",
+      "source": "https://raw.githubusercontent.com/antlr/antlr4/4.9.3/LICENSE.txt",
+      "packages": {"antlr4-python3-runtime": "4.9.3"}
+    },
+    {
+      "file": "Flatbuffers-25.12.19.txt",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "source": "https://raw.githubusercontent.com/google/flatbuffers/v25.12.19/LICENSE",
+      "packages": {"flatbuffers": "25.12.19"}
+    },
+    {
+      "file": "RapidOCR-3.9.2.txt",
+      "sha256": "3e0af25fdd06aa9586ae97adb00ea927ebe5a3805ac77d2d3a81ce5f55693333",
+      "source": "https://raw.githubusercontent.com/RapidAI/RapidOCR/v3.9.2/LICENSE",
+      "packages": {"rapidocr": "3.9.2"}
+    },
+    {
+      "file": "Qt-LGPL-3.0.txt",
+      "sha256": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768",
+      "source": "https://raw.githubusercontent.com/qt/qtbase/v6.11.2/LICENSES/LGPL-3.0-only.txt",
+      "packages": {"pyside6": "6.11.2", "pyside6-addons": "6.11.2", "pyside6-essentials": "6.11.2", "shiboken6": "6.11.2"}
+    },
+    {
+      "file": "Qt-GPL-3.0.txt",
+      "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+      "source": "https://raw.githubusercontent.com/qt/qtbase/v6.11.2/LICENSES/GPL-3.0-only.txt",
+      "packages": {"pyside6": "6.11.2", "pyside6-addons": "6.11.2", "pyside6-essentials": "6.11.2", "shiboken6": "6.11.2"}
+    }
+  ],
+  "models": {
+    "distribution": "rapidocr",
+    "version": "3.9.2",
+    "repository": "https://www.modelscope.cn/models/RapidAI/RapidOCR",
+    "license": "Apache-2.0",
+    "license_evidence": "https://www.modelscope.cn/api/v1/models/RapidAI/RapidOCR",
+    "license_declaration": "Apache License 2.0",
+    "evidence_last_updated_time": 1791469278,
+    "catalog_revision": "v3.9.2",
+    "file_evidence": [
+      "https://www.modelscope.cn/api/v1/models/RapidAI/RapidOCR/repo/files?Revision=v3.9.2&Root=onnx/PP-OCRv6&Recursive=true",
+      "https://www.modelscope.cn/api/v1/models/RapidAI/RapidOCR/repo/files?Revision=v3.9.2&Root=onnx/PP-OCRv4/cls&Recursive=true"
+    ],
+    "files": [
+      {
+        "name": "PP-OCRv6_det_small.onnx",
+        "upstream_path": "onnx/PP-OCRv6/det/PP-OCRv6_det_small.onnx",
+        "upstream_revision": "bbd748c6a4c6c19da672d72f491e355ca35f2d8a",
+        "size_bytes": 9929594,
+        "sha256": "090f04abcd9d9a7498bc4ebf677e4cb9bdce1fe4197ddb7e529f1ef44e1ff94f"
+      },
+      {
+        "name": "PP-OCRv6_rec_small.onnx",
+        "upstream_path": "onnx/PP-OCRv6/rec/PP-OCRv6_rec_small.onnx",
+        "upstream_revision": "4e9666f0fbf5fac850d30e530bf0a2e0d886aa78",
+        "size_bytes": 21234383,
+        "sha256": "6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884"
+      },
+      {
+        "name": "ch_ppocr_mobile_v2.0_cls_mobile.onnx",
+        "upstream_path": "onnx/PP-OCRv4/cls/ch_ppocr_mobile_v2.0_cls_mobile.onnx",
+        "upstream_revision": "b8ff564a23de421e7144385bfe120fe2bb869932",
+        "size_bytes": 585532,
+        "sha256": "e47acedf663230f8863ff1ab0e64dd2d82b838fceb5957146dab185a89d6215c"
+      }
+    ]
+  }
+}

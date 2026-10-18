@@ -1,0 +1,23 @@
+BotStudio
+Copyright (C) 2026 Christian Perner
+SPDX-License-Identifier: GPL-3.0-only
+
+BotStudio is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free
+Software Foundation, version 3 only.
+
+BotStudio is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
+more details.
+
+You should have received a copy of the GNU General Public License along
+with BotStudio in LICENSE. If not, see https://www.gnu.org/licenses/.
+
+This notice applies to BotStudio material for which Christian Perner holds
+the applicable rights. Third-party components retain their own licenses
+and notices. User-created Functions, game packages, images and other content
+are not automatically licensed by this notice; their respective rights apply.
+
+No separate acceptance form or distribution permission is required to
+exercise rights granted by the GPL. Distribution must comply with its terms.

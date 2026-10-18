@@ -1,0 +1,232 @@
+name: Windows release
+
+on:
+  push:
+    branches:
+      - 'feature/telegram-settings-autostart'
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: 'Publish a verified release (select an existing v<version> tag)'
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-release
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: powershell
+
+jobs:
+  build:
+    name: Build and verify Windows installer
+    runs-on: windows-2025
+    timeout-minutes: 35
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Check current repository access or public distribution approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: .\release\assert_release_access.ps1
+      - name: Check version and release tag
+        id: version
+        env:
+          RELEASE_REF_TYPE: ${{ github.ref_type }}
+          RELEASE_REF_NAME: ${{ github.ref_name }}
+          PUBLISH_REQUESTED: ${{ inputs.publish_release }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:PUBLISH_REQUESTED -eq "true" -and $env:RELEASE_REF_TYPE -ne "tag") {
+            throw "For publication select an existing v<version> tag, not a branch."
+          }
+          if ($env:RELEASE_REF_TYPE -eq "tag") {
+            $version = & .\release\get_release_version.ps1 -Tag $env:RELEASE_REF_NAME
+          } else {
+            $version = & .\release\get_release_version.ps1
+          }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.14.3'
+          architecture: x64
+      - name: Build both executables in isolated environment
+        run: .\release\build_windows.ps1 -Python (Get-Command python.exe).Source
+      - name: Verify bundled executables
+        run: .\release\verify_windows.ps1
+      - name: Install pinned Inno Setup compiler on disposable runner
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installer = Join-Path $env:RUNNER_TEMP "innosetup-6.4.3.exe"
+          $compilerDirectory = Join-Path $env:RUNNER_TEMP "botstudio-inno-6.4.3"
+          Invoke-WebRequest -UseBasicParsing -TimeoutSec 120 `
+            -Uri "https://github.com/jrsoftware/issrc/releases/download/is-6_4_3/innosetup-6.4.3.exe" `
+            -OutFile $installer
+          $expectedHash = "f3c42116542c4cc57263c5ba6c4feabfc49fe771f2f98a79d2f7628b8762723b"
+          if ((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash -ine $expectedHash) {
+            throw "Official Inno Setup download failed SHA-256 verification."
+          }
+          $process = Start-Process -FilePath $installer -ArgumentList @(
+            "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-",
+            "/CURRENTUSER", "/DIR=`"$compilerDirectory`""
+          ) -PassThru
+          if (-not $process.WaitForExit(120000)) {
+            Stop-Process -Id $process.Id -Force
+            throw "Inno Setup installation timed out."
+          }
+          $process.Refresh()
+          if ($process.ExitCode -ne 0 -or
+              -not (Test-Path -LiteralPath (Join-Path $compilerDirectory "ISCC.exe"))) {
+            throw "Inno Setup installation failed."
+          }
+          $compilerDirectory | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Compile isolated validation installer
+        run: .\release\build_installer.ps1 -ValidationBuild
+      - name: Verify install, update, uninstall and data preservation
+        run: .\release\verify_installer.ps1
+      - name: Compile normal installer
+        run: .\release\build_installer.ps1
+      - name: Prepare installer, checksum and version metadata
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: .\release\prepare_release.ps1 -Tag ("v" + $env:RELEASE_VERSION)
+      - name: Verify version rejection and release asset contract
+        run: .\release\verify_release.ps1
+      - name: Prepare exact application source, installed notices and native inventory
+        run: .\release\prepare_source.ps1
+      - name: Verify distribution approval gate without approving a release
+        run: .\release\verify_distribution.ps1
+      - name: Recheck repository access before uploading installer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: .\release\assert_release_access.ps1
+      - name: Retain only distributable assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-installer
+          path: |
+            dist/release/BotStudio-Setup-${{ steps.version.outputs.version }}.exe
+            dist/release/SHA256SUMS.txt
+            dist/release/release.json
+            dist/release/BotStudio-Application-Source-${{ steps.version.outputs.version }}.zip
+            dist/release/BotStudio-Notices-${{ steps.version.outputs.version }}.zip
+            dist/release/SOURCE-MANIFEST.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  publish:
+    name: Publish verified version tag
+    needs: build
+    if: github.ref_type == 'tag' && (github.event_name == 'push' || inputs.publish_release == true)
+    runs-on: windows-2025
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Require private repository or completed public distribution review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: .\release\assert_release_access.ps1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: windows-installer
+          path: release-assets
+      - name: Publish complete release without replacing existing releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $directory = Join-Path $env:GITHUB_WORKSPACE "release-assets"
+          $metadata = Get-Content -LiteralPath (Join-Path $directory "release.json") -Raw | ConvertFrom-Json
+          $installerName = "BotStudio-Setup-$($env:RELEASE_VERSION).exe"
+          if ($metadata.version -cne $env:RELEASE_VERSION -or
+              $metadata.tag -cne $env:RELEASE_TAG -or
+              $metadata.installer -cne $installerName) {
+            throw "Release metadata does not match the version tag."
+          }
+          $installer = Join-Path $directory $installerName
+          $hash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          $checksums = Get-Content -LiteralPath (Join-Path $directory "SHA256SUMS.txt") -Raw
+          if ($hash -cne $metadata.sha256 -or
+              $checksums.TrimEnd() -cne "$hash  $installerName" -or
+              (Get-Item -LiteralPath $installer).Length -ne $metadata.size_bytes) {
+            throw "Downloaded release assets failed integrity validation."
+          }
+          $sourceManifest = Get-Content -LiteralPath (Join-Path $directory "SOURCE-MANIFEST.json") -Raw | ConvertFrom-Json
+          if ($sourceManifest.schema_version -ne 1 -or
+              $sourceManifest.commit -cne $env:GITHUB_SHA -or
+              $sourceManifest.version -cne $env:RELEASE_VERSION -or
+              $sourceManifest.tag -cne $env:RELEASE_TAG -or
+              $sourceManifest.installer -cne $installerName -or
+              $sourceManifest.installer_sha256 -cne $hash -or
+              $sourceManifest.artifacts.Count -ne 2) {
+            throw "Source evidence is not bound to this build."
+          }
+          $expectedSourceAssets = @(
+            "BotStudio-Application-Source-$($env:RELEASE_VERSION).zip",
+            "BotStudio-Notices-$($env:RELEASE_VERSION).zip"
+          )
+          if (@(Compare-Object $expectedSourceAssets @($sourceManifest.artifacts.file)).Count -ne 0) {
+            throw "Unexpected source evidence asset names."
+          }
+          foreach ($artifact in $sourceManifest.artifacts) {
+            $path = Join-Path $directory $artifact.file
+            if ((Get-Item -LiteralPath $path).Length -ne $artifact.size_bytes -or
+                (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $artifact.sha256) {
+              throw "Source evidence failed integrity validation: $($artifact.file)"
+            }
+          }
+          $notes = Join-Path $env:RUNNER_TEMP "botstudio-release-notes.txt"
+          @(
+            "Windows x64 installer. Unsigned build; Windows may show a warning."
+            "MuMu, ADB and game/function packages are not included."
+            "Exit Studio and Watchdog before updating. Existing user data is preserved."
+            "See SHA256SUMS.txt for the installer checksum."
+            "Application source, installed notices and native inventory accompany this exact build."
+            "SOURCE-MANIFEST.json binds these evidence assets to the installer and source commit."
+            "Private test releases do not constitute public distribution/license clearance."
+          ) | Set-Content -LiteralPath $notes -Encoding UTF8
+          $releasesJson = gh release list --limit 1000 --json tagName,isDraft,isPrerelease
+          if ($LASTEXITCODE -ne 0) { throw "Could not inspect published release versions." }
+          $latest = "true"
+          foreach ($release in ($releasesJson | ConvertFrom-Json)) {
+            if (-not $release.isDraft -and -not $release.isPrerelease -and
+                $release.tagName -match '^v(\d+\.\d+\.\d+\.\d+)$') {
+              if ([version]$Matches[1] -gt [version]$env:RELEASE_VERSION) {
+                $latest = "false"
+              }
+            }
+          }
+          & .\release\assert_release_access.ps1
+          gh release create $env:RELEASE_TAG $installer `
+            (Join-Path $directory "SHA256SUMS.txt") (Join-Path $directory "release.json") `
+            (Join-Path $directory $expectedSourceAssets[0]) `
+            (Join-Path $directory $expectedSourceAssets[1]) `
+            (Join-Path $directory "SOURCE-MANIFEST.json") `
+            --verify-tag --draft --title "BotStudio $($env:RELEASE_VERSION)" `
+            --notes-file $notes --generate-notes
+          if ($LASTEXITCODE -ne 0) { throw "Release creation failed; no existing release will be overwritten." }
+          & .\release\assert_release_access.ps1
+          gh release edit $env:RELEASE_TAG --draft=false "--latest=$latest"
+          if ($LASTEXITCODE -ne 0) { throw "Publishing failed; inspect the draft release." }

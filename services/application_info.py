@@ -1,0 +1,4 @@
+APP_NAME = "BotStudio"
+APP_VERSION = "0.1.0.4"
+STUDIO_APP_USER_MODEL_ID = "BotStudio.Studio"
+GITHUB_OAUTH_CLIENT_ID = "Ov23liEXc2Px1TtXAbpw"
