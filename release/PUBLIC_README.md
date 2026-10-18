@@ -23,7 +23,7 @@ This repository starts with a clean snapshot of the current application
 source. It does not contain the private development history, credentials,
 profiles, game accounts, user packages, logs, backups or old test installers.
 
-Beta 1 uses version **0.1.0.6** and is published as a GitHub **prerelease**,
+Beta 1 uses version **0.1.0.7** and is published as a GitHub **prerelease**,
 not a stable release. Download the installer and its source/notice companions
 from [Releases](https://github.com/pernerch/botstudio-public/releases).
 Keep backups and use separate test data. Real two-machine/two-account game

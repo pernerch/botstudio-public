@@ -135,7 +135,7 @@ public static class InstallerGuardFixture {
     if (-not (Test-Path -LiteralPath (Join-Path $install "unins000.exe"))) {
         throw "Installed uninstaller is missing."
     }
-    & (Join-Path $PSScriptRoot "verify_windows.ps1") -BundleDirectory $install -TimeoutSeconds 90
+    & (Join-Path $PSScriptRoot "verify_windows.ps1") -BundleDirectory $install -TimeoutSeconds 90 -Installed
     New-Item -Path $registryPath -Force | Out-Null
     $foreignCommand = '"C:\Other Installation\BotStudioWatchdog.exe" --working-directory "C:\Other Data"'
     New-ItemProperty -LiteralPath $registryPath -Name "BotStudioWatchdog" -Value $foreignCommand -PropertyType String -Force | Out-Null
@@ -153,7 +153,7 @@ public static class InstallerGuardFixture {
     if ((Get-FileHash -LiteralPath $sentinel -Algorithm SHA256).Hash -ne $sentinelHash) {
         throw "Upgrade changed user content."
     }
-    & (Join-Path $PSScriptRoot "verify_windows.ps1") -BundleDirectory $install -TimeoutSeconds 90
+    & (Join-Path $PSScriptRoot "verify_windows.ps1") -BundleDirectory $install -TimeoutSeconds 90 -Installed
     # PrepareToInstall must reject an explicit program/data directory overlap.
     Invoke-BoundedProcess $setup ($common + @(
         ('/DIR="' + $data + '"'), ('/LOG="' + (Join-Path $testRoot "overlap.log") + '"')

@@ -2,7 +2,8 @@ param(
     [string]$BundleDirectory,
     [int]$TimeoutSeconds = 90,
     [string]$ValidationDataRoot,
-    [switch]$NativeWindow
+    [switch]$NativeWindow,
+    [switch]$Installed
 )
 
 $ErrorActionPreference = "Stop"
@@ -24,28 +25,7 @@ foreach ($name in @("LICENSE", "LICENSE-NOTICE.txt")) {
     }
 }
 $notices = Join-Path $bundle "_internal\third_party"
-$nativeMap = Get-Content -LiteralPath (Join-Path $notices "native-licenses.json") -Raw | ConvertFrom-Json
-$nativeFiles = @(Get-ChildItem -LiteralPath $bundle -Recurse -File |
-    Where-Object { $_.Extension -in @(".exe", ".dll", ".pyd") } |
-    ForEach-Object { $_.FullName.Substring($bundle.Length + 1).Replace("\", "/") })
-if ($nativeMap.schema_version -ne 1 -or -not $nativeMap.files -or
-    @($nativeMap.unmapped_files).Count -ne 0 -or
-    @(Compare-Object @($nativeMap.files.path) $nativeFiles).Count -ne 0) {
-    throw "Native license map does not cover the assembled bundle."
-}
-foreach ($file in $nativeMap.files) {
-    $path = Join-Path $bundle $file.path
-    if (-not $file.owner -or -not $file.notice_files -or
-        (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $file.sha256 -or
-        (Get-Item -LiteralPath $path).Length -ne $file.size_bytes) {
-        throw "Native license map identity mismatch."
-    }
-    foreach ($notice in $file.notice_files) {
-        if (-not (Test-Path -LiteralPath (Join-Path $notices $notice) -PathType Leaf)) {
-            throw "Missing mapped native notice: $notice"
-        }
-    }
-}
+& (Join-Path $PSScriptRoot "verify_native_licenses.ps1") -BundleDirectory $bundle -Installed:$Installed
 $inventory = Get-Content -LiteralPath (Join-Path $notices "inventory.json") -Raw | ConvertFrom-Json
 if ($inventory.schema_version -ne 1 -or $inventory.status -cne "review_required" -or
     -not $inventory.packages -or @($inventory.missing_notice_packages).Count -ne 0 -or

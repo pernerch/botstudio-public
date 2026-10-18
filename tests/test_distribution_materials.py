@@ -16,6 +16,41 @@ PROJECT = Path(__file__).resolve().parents[1]
 
 
 class NativeDistributionTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("powershell"), "Windows release tools")
+    def test_installed_native_map_excludes_only_inno_generated_root_uninstaller(self):
+        with TemporaryDirectory() as temporary:
+            bundle = Path(temporary)
+            notices = bundle / "_internal" / "third_party"
+            notices.mkdir(parents=True)
+            (notices / "LICENSE.txt").write_bytes(b"test license")
+            payload = b"synthetic native payload, never executed"
+            (bundle / "BotStudio.exe").write_bytes(payload)
+            (bundle / "unins000.exe").write_bytes(b"synthetic installer-generated uninstaller")
+            (notices / "native-licenses.json").write_text(json.dumps({
+                "schema_version": 1, "unmapped_files": [], "files": [{
+                    "path": "BotStudio.exe", "owner": "botstudio",
+                    "sha256": hashlib.sha256(payload).hexdigest(), "size_bytes": len(payload),
+                    "notice_files": ["LICENSE.txt"],
+                }],
+            }), encoding="utf-8")
+            command = [
+                "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                str(PROJECT / "release" / "verify_native_licenses.ps1"),
+                "-BundleDirectory", str(bundle),
+            ]
+            def verify(installed):
+                return subprocess.run(command + (["-Installed"] if installed else []),
+                                      capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(0, verify(False).returncode)
+            installed = verify(True)
+            self.assertEqual(0, installed.returncode, installed.stdout + installed.stderr)
+            unexpected = bundle / "_internal" / "unins000.exe"
+            unexpected.write_bytes(b"unexpected nested executable")
+            self.assertNotEqual(0, verify(True).returncode)
+            unexpected.unlink()
+            (bundle / "BotStudio.exe").write_bytes(b"changed payload")
+            self.assertNotEqual(0, verify(True).returncode)
+
     def test_native_ownership_covers_libraries_without_accepting_unknown_native_files(self):
         cases = {
             "BotStudio.exe": "botstudio",
