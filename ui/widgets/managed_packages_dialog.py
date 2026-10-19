@@ -1,4 +1,6 @@
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from uuid import uuid4
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Qt, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices, QTextCursor, QTextDocument
@@ -16,6 +18,10 @@ from services.github_catalog_service import GitHubCatalogService
 from services.managed_package_service import ManagedPackageService
 from services.package_service import PackageError, PackageService
 from services.package_description_service import PackageDescriptionService
+from services.package_outbox_service import PackageOutboxService
+from services.package_activation_service import PackageActivationService
+from services.file_io import read_json
+from services.application_paths import ApplicationPaths
 from services.reinitialize_service import get_default_reinitialize_service
 from ui.i18n.translator import t
 from ui.widgets.package_preparation_dialog import PackagePreparationDialog
@@ -73,9 +79,9 @@ class _ActivationProgress(QDialog):
 
 
 class ManagedPackagesDialog(QDialog):
-    """Explicit local storage and separately confirmed active content transfer."""
+    """Simple exchange with automatic safe copies and optional advanced actions."""
 
-    def __init__(self, parent=None, service=None, activation_service=None, embedded=False):
+    def __init__(self, parent=None, service=None, activation_service=None, embedded=False, outbox_service=None):
         super().__init__(parent)
         self.embedded = embedded
         if embedded:
@@ -84,6 +90,10 @@ class ManagedPackagesDialog(QDialog):
         self.service = service if service is not None else ManagedPackageService()
         self.logger = get_logger("packages")
         self.activation_service = activation_service
+        self.outbox_service = outbox_service or PackageOutboxService(
+            self.service.packages, self.service.root.parent / "package-outbox",
+        )
+        self.packed_packages = []
         self.worker = None
         self._completion = None
         self.confirmation = None
@@ -94,6 +104,29 @@ class ManagedPackagesDialog(QDialog):
         self.resize(960, 680)
         layout = QVBoxLayout(self)
         tabs = QTabWidget()
+        self.tabs = tabs
+        upload_tab = QWidget()
+        upload_layout = QVBoxLayout(upload_tab)
+        self.pack_new = QPushButton(t("packages.check_pack"))
+        self.packed_table = QTableWidget(0, 4)
+        self.packed_table.setHorizontalHeaderLabels([
+            t("packages.package"), t("packages.version"), t("settings.game"), t("packages.state"),
+        ])
+        self.packed_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.packed_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.packed_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.packed_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.packed_table.itemSelectionChanged.connect(self._controls)
+        self.upload_packed = QPushButton(t("packages.upload_packed"))
+        self.pack_new.clicked.connect(self._prepare_package_for_upload)
+        self.upload_packed.clicked.connect(self._upload_packed)
+        upload_layout.addWidget(self.pack_new)
+        public_notice = QLabel(t("packages.upload_notice"))
+        public_notice.setWordWrap(True)
+        upload_layout.addWidget(public_notice)
+        upload_layout.addWidget(self.packed_table)
+        upload_layout.addWidget(self.upload_packed)
+        tabs.addTab(upload_tab, t("packages.packed_tab"))
         local_tab = QWidget()
         local_layout = QVBoxLayout(local_tab)
         catalog_tab = QWidget()
@@ -175,6 +208,10 @@ class ManagedPackagesDialog(QDialog):
         self.catalog_entries.setMinimumHeight(160)
         self.catalog_entries.currentItemChanged.connect(self._catalog_selection_changed)
         self.catalog_download = QPushButton(t("packages.catalog_download"))
+        self.catalog_download.setText(t("packages.download_use"))
+        self.catalog_profile = QComboBox()
+        self.catalog_profile.addItem(t("packages.target_profile"), "")
+        catalog_layout.addWidget(self.catalog_profile)
         self.catalog_download.clicked.connect(self._download_catalog)
         self.catalog_more = QPushButton(t("packages.catalog_more"))
         self.catalog_more.clicked.connect(self._load_more_catalog)
@@ -183,8 +220,9 @@ class ManagedPackagesDialog(QDialog):
         catalog_layout.addLayout(catalog_actions_row)
         catalog_layout.addWidget(self.catalog_scope)
         catalog_layout.addWidget(self.catalog_entries, stretch=1)
-        tabs.addTab(local_tab, t("packages.local_tab"))
         tabs.addTab(catalog_tab, t("packages.catalog_tab"))
+        tabs.addTab(local_tab, t("packages.more_actions"))
+        tabs.currentChanged.connect(self._tab_changed)
         layout.addWidget(tabs, stretch=1)
         action_row = QHBoxLayout()
         action_row.addWidget(self.more_actions)
@@ -192,7 +230,7 @@ class ManagedPackagesDialog(QDialog):
         layout.addLayout(action_row)
         self.details = _PackageDetails()
         self.details.setReadOnly(True)
-        self.details.setPlaceholderText(t("packages.preview_hint"))
+        self.details.setPlaceholderText(t("packages.simple_hint"))
         layout.addWidget(self.details)
         row = QHBoxLayout()
         self.close_button = QPushButton(t("common.close"))
@@ -231,7 +269,51 @@ class ManagedPackagesDialog(QDialog):
             self,
             package_service=self.service.packages,
             game_id=game_id,
+            simple_flow=True,
+            outbox_service=self.outbox_service,
         ).exec()
+        self._reload_outbox()
+
+    def _tab_changed(self, index):
+        if index == 0 and self.worker is None:
+            self._reload_outbox()
+
+    def _reload_outbox(self):
+        self._run(self.outbox_service.list_packages, self._outbox_loaded)
+
+    def _outbox_loaded(self, packages):
+        self.packed_packages = packages
+        self.packed_table.setRowCount(len(packages))
+        for row, entry in enumerate(packages):
+            values = (
+                entry["name"], entry["version"], entry["game_id"],
+                t("packages.uploaded") if entry["publication"] else t("packages.packed_ready"),
+            )
+            for column, value in enumerate(values):
+                self.packed_table.setItem(row, column, QTableWidgetItem(value))
+        self._controls()
+
+    def _upload_packed(self):
+        row = self.packed_table.currentRow()
+        if self.worker is not None or not 0 <= row < len(self.packed_packages):
+            return
+        entry = self.packed_packages[row]
+        if entry["publication"]:
+            return
+
+        def upload():
+            preview = self.service.preview(Path(entry["path"]))
+            service = GitHubSubmissionService(preflight=CatalogSubmissionService(managed=self.service))
+            plan = service.prepare(Path(entry["path"]), expected_sha256=preview["archive_sha256"])
+            publication = service.submit(Path(entry["path"]), plan=plan)
+            self.outbox_service.uploaded(entry["path"], preview["archive_sha256"], publication)
+            return publication
+
+        def uploaded(result):
+            self._submission_sent(result)
+            self._reload_outbox()
+
+        self._run(upload, uploaded)
 
     def _controls(self):
         idle = self.worker is None and self.confirmation is None
@@ -241,8 +323,14 @@ class ManagedPackagesDialog(QDialog):
             self.table, self.refresh, self.choose, self.close_button,
             self.catalog, self.prepare_upload, self.more_actions,
             self.catalog_search, self.catalog_type,
+            self.pack_new, self.packed_table, self.catalog_profile,
         ):
             widget.setEnabled(idle)
+        packed_row = self.packed_table.currentRow()
+        self.upload_packed.setEnabled(
+            idle and 0 <= packed_row < len(self.packed_packages)
+            and not self.packed_packages[packed_row]["publication"]
+        )
         self.install.setEnabled(idle and self.preview is not None)
         self.update.setEnabled(idle and self.preview is not None and valid)
         self.submission_check.setEnabled(idle and self.preview is not None)
@@ -268,6 +356,21 @@ class ManagedPackagesDialog(QDialog):
 
     def _catalog_selection_changed(self, current, previous):
         entry = self._catalog_entry()
+        previous_profile = self.catalog_profile.currentData()
+        self.catalog_profile.clear()
+        self.catalog_profile.addItem(t("packages.target_profile"), "")
+        game_id = ((entry or {}).get("package") or {}).get("game_id")
+        for profile in (self.catalog_result or {}).get("local_profiles", []):
+            if game_id is None or profile.get("game") == game_id:
+                self.catalog_profile.addItem(
+                    str(profile.get("name") or profile.get("id") or ""),
+                    str(profile.get("botstudio_profile_id") or profile.get("id") or ""),
+                )
+        index = self.catalog_profile.findData(previous_profile)
+        if index > 0:
+            self.catalog_profile.setCurrentIndex(index)
+        elif self.catalog_profile.count() == 2:
+            self.catalog_profile.setCurrentIndex(1)
         if self.worker is None and self.confirmation is None:
             self.preview = None
             self.details.setPlainText(
@@ -290,7 +393,15 @@ class ManagedPackagesDialog(QDialog):
         self.catalog_result = None
         self.catalog_entries.clear()
         self.details.clear()
-        self._run(GitHubCatalogService().load, self._catalog_loaded)
+        def load():
+            result = GitHubCatalogService().load()
+            if self.activation_service is not None:
+                profiles = read_json(self.activation_service.root / "profiles" / "profiles.json")
+                if not isinstance(profiles, list):
+                    raise PackageError("invalid local profile store")
+                result["local_profiles"] = profiles
+            return result
+        self._run(load, self._catalog_loaded)
 
     def _catalog_loaded(self, result):
         self.catalog_result = result
@@ -404,7 +515,10 @@ class ManagedPackagesDialog(QDialog):
                 return
             entries[entry["asset_id"]] = entry
         self.preview = None
-        self._catalog_loaded({**result, "entries": list(entries.values())})
+        self._catalog_loaded({
+            **result, "entries": list(entries.values()),
+            "local_profiles": previous.get("local_profiles", []),
+        })
 
     @staticmethod
     def _catalog_entry_text(entry):
@@ -440,17 +554,50 @@ class ManagedPackagesDialog(QDialog):
         if entry is None:
             return
         catalog = self.catalog_result
-        path, _ = QFileDialog.getSaveFileName(
-            self, t("packages.catalog_download"), "package.botstudio.zip", "BotStudio (*.botstudio.zip)",
-        )
-        if not path:
+        if self.activation_service is None:
+            self._error(t("packages.download_unavailable"))
+            return
+        profile_id = self.catalog_profile.currentData() or ""
+        if self._catalog_type(entry) == "event" and not profile_id:
+            self._error(t("packages.profile_required"))
             return
         self.preview = None
         self.details.clear()
-        self._run(
-            lambda: GitHubCatalogService().download_preview(catalog, entry, Path(path), self.service),
-            self._previewed,
-        )
+        if self.embedded:
+            self.activation_progress = _ActivationProgress(self)
+            self.activation_progress.setWindowTitle(t("packages.download_use"))
+            QVBoxLayout(self.activation_progress).addWidget(QLabel(t("packages.busy")))
+            self.activation_progress.open()
+
+        def download():
+            with TemporaryDirectory(prefix="bs-get-") as temporary:
+                directory = Path(temporary)
+                path = directory / "package.botstudio.zip"
+                preview = GitHubCatalogService().download_preview(catalog, entry, path, self.service)
+                managed = ManagedPackageService(
+                    root=ApplicationPaths.long_path(
+                        self.service.root.parent / "package-downloads" / uuid4().hex,
+                    ),
+                    packages=self.service.packages,
+                )
+                installed = managed.install(
+                    path, expected_sha256=preview["archive_sha256"],
+                    catalog_source=preview["catalog_source"],
+                )
+                activation = PackageActivationService(
+                    root=self.activation_service.root, managed=managed,
+                    execution_guard=self.activation_service.execution_guard, logger=self.logger,
+                )
+                return activation.import_copy(installed["installation_id"], profile_id)
+
+        self._run(download, self._downloaded)
+
+    def _downloaded(self, result):
+        bus = get_default_reinitialize_service()
+        for source in ("library", "variable", "function", "scheduler"):
+            bus.publish(source, game_id=result["game_id"])
+        self.status.setText(t("packages.download_complete"))
+        self.details.setPlainText(t("packages.download_complete"))
 
     def _error(self, message):
         self.status.setText(t("packages.failed").format(error=message))
@@ -492,7 +639,12 @@ class ManagedPackagesDialog(QDialog):
             self._controls()
 
     def reload(self):
-        self._run(self._load_installations, self._loaded)
+        def load():
+            return self._load_installations(), self.outbox_service.list_packages()
+        def loaded(result):
+            self._loaded(result[0])
+            self._outbox_loaded(result[1])
+        self._run(load, loaded)
 
     def _load_installations(self):
         installations = self.service.list_installations()

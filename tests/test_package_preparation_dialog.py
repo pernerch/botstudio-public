@@ -1,4 +1,5 @@
 import json
+import hashlib
 import faulthandler
 import os
 from pathlib import Path
@@ -21,6 +22,7 @@ from services.package_license_service import (
     PackagePreparationService,
 )
 from services.package_service import PackageError, PackageService
+from services.package_outbox_service import PackageOutboxService
 from services.scheduler_service import Event, Task, PROTECTED_TASK_KINDS
 from services.package_description_service import PackageDescriptionService
 from ui.widgets.managed_packages_dialog import _PackageDetails
@@ -137,6 +139,76 @@ class PackagePreparationDialogTests(unittest.TestCase):
         image.fill(0xFF336699)
         self.assertTrue(image.save(str(path), "PNG"))
         return path
+
+    def test_simple_check_and_pack_persists_archive_without_preview_or_save_dialog(self):
+        outbox = PackageOutboxService(self.package_service, self.root / "outbox")
+        dialog = PackagePreparationDialog(
+            package_service=self.package_service,
+            game_id="game",
+            simple_flow=True,
+            outbox_service=outbox,
+        )
+        self.addCleanup(dialog.deleteLater)
+        self.wait_for_idle(dialog)
+        self.assertTrue(dialog.rights.isEnabled())
+        self.assertFalse(dialog.preview_button.isEnabled())
+        dialog.rights.setChecked(True)
+        self.assertTrue(dialog.preview_button.isEnabled())
+        with (
+            patch("ui.widgets.package_preparation_dialog.QFileDialog.getSaveFileName") as picker,
+            patch("ui.widgets.package_preparation_dialog.QMessageBox.information") as message,
+        ):
+            dialog.preview_button.click()
+            self.wait_for_idle(dialog)
+            picker.assert_not_called()
+            message.assert_not_called()
+        self.assertEqual(QDialog.Accepted, dialog.result(), dialog.status.text())
+        packages = outbox.list_packages()
+        self.assertEqual(1, len(packages))
+        self.assertEqual("Example", packages[0]["name"])
+        self.assertIsNone(packages[0]["publication"])
+        restarted = PackageOutboxService(self.package_service, self.root / "outbox")
+        self.assertEqual(packages, restarted.list_packages())
+        manifest = self.package_service.inspect_package(packages[0]["path"])
+        self.assertTrue(manifest["package_metadata"]["rights_confirmed"])
+        self.assertNotIn("SHA-256", dialog.details.toPlainText())
+
+    def test_packed_list_uploads_selected_archive_without_technical_confirmation(self):
+        outbox = PackageOutboxService(self.package_service, self.root / "outbox")
+        dialog = PackagePreparationDialog(
+            package_service=self.package_service, simple_flow=True, outbox_service=outbox,
+        )
+        self.addCleanup(dialog.deleteLater)
+        self.wait_for_idle(dialog)
+        dialog.rights.setChecked(True)
+        dialog.preview_button.click()
+        self.wait_for_idle(dialog)
+        managed = Mock(root=self.root / "managed", packages=self.package_service)
+        managed.list_installations.return_value = []
+        managed.preview.side_effect = lambda path: {
+            "path": str(path),
+            "archive_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+        from ui.widgets.managed_packages_dialog import ManagedPackagesDialog
+        upload = ManagedPackagesDialog(service=managed, outbox_service=outbox)
+        self.addCleanup(upload.deleteLater)
+        upload._outbox_loaded(outbox.list_packages())
+        upload.packed_table.selectRow(0)
+        self.assertTrue(upload.upload_packed.isEnabled())
+        publisher = Mock()
+        publisher.submit.return_value = {"url": "https://github.com/pernerch/botstudio-catalog/pull/1"}
+        with patch("ui.widgets.managed_packages_dialog.GitHubSubmissionService", return_value=publisher):
+            upload.upload_packed.click()
+            deadline = time.monotonic() + 5
+            while upload.worker is not None and time.monotonic() < deadline:
+                self.app.processEvents()
+                time.sleep(0.005)
+            self.assertIsNone(upload.worker)
+        publisher.prepare.assert_called_once()
+        publisher.submit.assert_called_once()
+        self.assertIsNone(upload.confirmation)
+        self.assertEqual(publisher.submit.return_value, outbox.list_packages()[0]["publication"])
+        self.assertFalse(upload.upload_packed.isEnabled())
 
     def test_event_sources_group_profiles_and_history_but_keep_content_variants(self):
         first = Event(

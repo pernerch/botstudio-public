@@ -904,7 +904,7 @@ class ManagedPackageTests(unittest.TestCase):
         self.assertEqual("", dialog.details.toPlainText())
         self.assertTrue(dialog.catalog.isEnabled())
 
-    def test_catalog_download_inspects_real_package_before_explicit_storage(self):
+    def test_catalog_download_without_safe_activation_fails_before_network_or_file_selection(self):
         from services.github_catalog_service import GitHubCatalogService
         from models.github_account import GitHubAccount
         archive = self.archive()
@@ -935,31 +935,9 @@ class ManagedPackageTests(unittest.TestCase):
             unused.assert_not_called()
         self.assertFalse(target.exists())
         self.assertIsNone(dialog.preview)
-        with (
-            patch.object(service, "load", return_value=catalog),
-            patch("ui.widgets.managed_packages_dialog.GitHubCatalogService", return_value=service),
-            patch("ui.widgets.managed_packages_dialog.QFileDialog.getSaveFileName", return_value=(str(target), "")),
-        ):
-            dialog.catalog_download.click()
-            self.wait_for_idle(dialog)
-        self.assertEqual(payload, target.read_bytes())
-        self.assertEqual(str(target), dialog.preview["path"])
-        self.assertEqual(entry["digest"], "sha256:" + dialog.preview["archive_sha256"])
-        self.assertEqual(10, dialog.preview["catalog_source"]["repository_id"])
-        self.assertIn("Fixture terms", dialog.details.toPlainText())
+        self.assertIn(t("packages.download_unavailable"), dialog.status.text())
+        request.assert_not_called()
         self.assertEqual([], self.store.list_installations())
-        dialog.install.click()
-        self.assertIn("@uploader", dialog.confirmation.text())
-        self.assertEqual(
-            QMessageBox.No, dialog.confirmation.standardButton(dialog.confirmation.defaultButton()),
-        )
-        dialog.confirmation.done(QMessageBox.No)
-        self.assertEqual([], self.store.list_installations())
-        dialog.install.click()
-        dialog.confirmation.done(QMessageBox.Yes)
-        self.wait_for_idle(dialog)
-        self.assertEqual(1, len(self.store.list_installations()))
-        self.assertEqual(10, self.store.list_installations()[0]["catalog_source"]["repository_id"])
         self.assertEqual([], list(self.root.glob("botstudio-download-*")))
 
     def test_catalog_tree_groups_variants_and_requires_explicit_version_selection(self):
@@ -1035,6 +1013,7 @@ class ManagedPackageTests(unittest.TestCase):
         self.assertIsNone(dialog.preview)
         self.assertFalse(dialog.install.isEnabled())
         self.assertIn(t("packages.catalog_prerelease"), version.text(0))
+        dialog.activation_service = Mock()
         with (
             patch("ui.widgets.managed_packages_dialog.QFileDialog.getSaveFileName",
                   return_value=(str(self.root / "selected.zip"), "")),

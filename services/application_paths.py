@@ -35,3 +35,12 @@ class ApplicationPaths:
 
     def resource(self, *parts: str) -> Path:
         return self.resource_root.joinpath(*parts)
+
+    @staticmethod
+    def long_path(path: Path) -> Path:
+        resolved = str(path.resolve())
+        if os.name != "nt" or resolved.startswith("\\\\?\\"):
+            return Path(resolved)
+        if resolved.startswith("\\\\"):
+            return Path("\\\\?\\UNC\\" + resolved[2:])
+        return Path("\\\\?\\" + resolved)

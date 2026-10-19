@@ -5,8 +5,8 @@
     "approved_runtime_manifest_sha256":  "99e0c0f5f17b571ece2a0eb3879461d602d7e03c54266c222740df944163ed9d",
     "approved_materials_sha256":  "e10112f2b794c17dd8a58f30565c5481afb8beea3e313c6129af6cc2a988c14e",
     "approved_dependency_sources_sha256":  "00fb71f54933194a9d36c90b7e146930c4f14da6037e233df756f6dae27c6652",
-    "approved_application_version":  "0.1.0.8",
-    "evidence_date":  "2026-10-18",
+    "approved_application_version":  "0.1.0.9",
+    "evidence_date":  "2026-10-19",
     "observations":  [
                          "The original frozen bundle included Qt6VirtualKeyboard.dll through the QtGui platform input plugin.",
                          "A build hook removes that unused plugin before dependency analysis; rebuilt native-window and offline-OCR checks pass.",
@@ -35,7 +35,8 @@
                          "Required notice/source integration and distribution-gate regressions passed, as did real Studio/Watchdog 0.1.0.5 frozen self-tests including offline OCR and package roundtrip. Public publication still requires its clean-commit CI executable/installer/source verification and accompanying seven release assets.",
                          "The first public 0.1.0.5 CI stopped before publication because CPython\u0027s OpenSSL DLLs use the additional upstream -x64 filename suffix on that runner. Version 0.1.0.6 recognizes only the explicit libcrypto-3-x64.dll and libssl-3-x64.dll variants with the same retained Python/OpenSSL notices; unknown native names remain rejected. No dependency versions or license/source materials changed.",
                          "Public 0.1.0.6 CI passed the native notice map and executable self-tests, then stopped after a successful installation because the payload-only map did not include Inno\u0027s newly generated unins000.exe. Version 0.1.0.7 explicitly distinguishes installed payload verification from assembled bundle verification: only the root unins000.exe is excluded in installed mode; all payload identities and notice coverage remain mandatory.",
-                         "User requests a new Beta 1 release at 0.1.0.8 containing package preparation, catalog display, bounded large-upload transport and lossless per-entry screenshot sharing fixes. Runtime/build dependencies, model materials, upstream source locks and native packaging are unchanged from 0.1.0.7; the same mandatory license approval applies subject to fresh clean-source CI verification and all seven source/notice/installer assets. Git for Windows is an optional separately installed transport tool, not a bundled component."
+                         "User requests a new Beta 1 release at 0.1.0.8 containing package preparation, catalog display, bounded large-upload transport and lossless per-entry screenshot sharing fixes. Runtime/build dependencies, model materials, upstream source locks and native packaging are unchanged from 0.1.0.7; the same mandatory license approval applies subject to fresh clean-source CI verification and all seven source/notice/installer assets. Git for Windows is an optional separately installed transport tool, not a bundled component.",
+                         "User requests Beta 1 version 0.1.0.9 with simplified check-and-pack, persistent upload list and automatically verified, non-overwriting catalog imports. Fresh SHA256 checks on 2026-10-19 confirm unchanged runtime manifest, distribution materials and dependency-source lock against 0.1.0.8 approval. No runtime/build dependency, model or native packaging change; the existing mandatory license approval applies to the new application version subject to clean-source CI, executable/installer verification and all seven accompanying source/notice/installer assets."
                      ],
     "sources":  [
                     "https://doc.qt.io/qt-6.11/qtvirtualkeyboard-index.html",

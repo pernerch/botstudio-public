@@ -3,6 +3,7 @@ import faulthandler
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Lock, get_ident
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
 from models.bot_function import BotFunction
 from models.function_block import FunctionBlock
+from models.function_connection import FunctionConnection
 from models.github_account import GitHubAccount
 from scheduler.models import Event, Task, SchedulerService
 from services.application_bootstrap import initialize_application
@@ -163,6 +165,193 @@ class PackageActivationTests(TestCase):
 
     def activate(self, status, plan):
         return self.activation.activate(status["installation_id"], plan["profile_id"], plan["plan_sha256"])
+
+    def test_copy_import_numbers_names_and_remaps_all_dependencies_without_overwrites(self):
+        self.function.connections = [
+            FunctionConnection(self.function.blocks[0].block_id, "success", self.function.blocks[1].block_id),
+        ]
+        self.function.normalize_graph()
+        status = self.install(mutate=lambda content: content.update({
+            "content/package-assets/overview.png": content["content/library/image/pattern_reference.png"],
+        }))
+        original = ManagedPackageService._snapshot(Path(status["working_directory"]))
+        copied_ids = set()
+        for number in range(1, 4):
+            before = self.active_snapshot()
+            result = self.activation.import_copy(status["installation_id"])
+            suffix = "" if number == 1 else f" {number}"
+            functions = [
+                BotFunction.from_dict(read_json(path))
+                for path in (self.root / "data/functions/game").glob("*.json")
+            ]
+            function = next(value for value in functions if value.name == "Function" + suffix)
+            helper = next(value for value in functions if value.name == "Helper" + suffix)
+            self.assertNotIn(function.function_id, copied_ids)
+            copied_ids.update((function.function_id, helper.function_id))
+            self.assertEqual([helper.function_id], function.collect_helper_ids())
+            self.assertEqual(helper.function_id, function.blocks[0].params["function_id"])
+            self.assertEqual(self.function.connections, function.connections)
+            self.assertIs(function.blocks[1], function.blocks[0].branches["success"][0])
+            library_id = function.blocks[1].params["library_entry_id"]
+            if number > 1:
+                self.assertNotEqual("image", library_id)
+            library = read_json(self.root / "data/library" / library_id / "entry.json")
+            self.assertTrue(Path(library["pattern"]["reference_path"]).is_file())
+            for sample in library["accepted_samples"]:
+                self.assertTrue(Path(sample["source"]).is_file())
+                self.assertTrue(Path(sample["crop"]).is_file())
+            events = [
+                Event.from_dict(read_json(path))
+                for path in (self.root / "data/scheduler/game").glob("*.json")
+            ]
+            event = next(value for value in events if value.name == "Event" + suffix)
+            self.assertEqual([function.function_id], event.tasks[0].function_ids)
+            if number > 1:
+                self.assertNotEqual("event", event.event_id)
+            self.assertNotEqual("task", event.tasks[0].task_id)
+            self.assertEqual("technical-local", event.profile_id)
+            self.assertFalse(event.enabled)
+            self.assertIsNone(event.next_due_at)
+            for name, value in before.items():
+                if name == "data/variables/game/variables.json":
+                    definitions = read_json(self.root / name)
+                    for definition in json.loads(value):
+                        self.assertIn(definition, definitions)
+                else:
+                    self.assertEqual(value, (self.root / name).read_bytes(), name)
+            receipt = read_json(self.activation._receipt_path(result["installation_id"]))
+            self.assertEqual(status["installation_id"], receipt["source_installation_id"])
+            self.assertTrue(Path(receipt["source_archive"]).is_file())
+        self.assertEqual(original, ManagedPackageService._snapshot(Path(status["working_directory"])))
+        self.assertEqual(3, len(self.guard_entries))
+
+    def test_copy_import_conflicts_fail_atomically_and_names_are_case_insensitive(self):
+        status = self.install()
+        atomic_write_json(
+            self.root / "data/functions/game/local.json",
+            dict(self.function.to_dict(), function_id="local", name="function"),
+        )
+        result = self.activation.import_copy(status["installation_id"])
+        names = [
+            read_json(path)["name"]
+            for path in (self.root / "data/functions/game").glob("*.json")
+        ]
+        self.assertIn("Function 2", names)
+        registry = self.root / "data/variables/game/variables.json"
+        definitions = read_json(registry)
+        definitions[0]["initial_value"] = 99
+        atomic_write_json(registry, definitions)
+        before = self.active_snapshot()
+        with self.assertRaisesRegex(PackageError, "conflicts"):
+            self.activation.import_copy(status["installation_id"])
+        self.assertEqual(before, self.active_snapshot())
+        self.assertTrue(self.activation._receipt_path(result["installation_id"]).is_file())
+
+    def test_copy_import_does_not_repair_invalid_source_identities(self):
+        for area in ("function", "event"):
+            with self.subTest(area=area):
+                if area == "function":
+                    self.function.saved = False
+                else:
+                    self.function.saved = True
+                    self.event.tasks[0].task_id = ""
+                archive = self.install(store=False)
+                managed = ManagedPackageService(self.root / area, self.packages)
+                status = managed.install(archive)
+                activation = PackageActivationService(
+                    root=self.root, managed=managed, execution_guard=self.activation.execution_guard,
+                    logger=Mock(),
+                )
+                before = self.active_snapshot()
+                with self.assertRaises(PackageError):
+                    activation.import_copy(status["installation_id"])
+                self.assertEqual(before, self.active_snapshot())
+
+    def test_catalog_download_adds_repeated_copies_without_picker_or_activation_consent(self):
+        from services.github_catalog_service import GitHubCatalogService
+        downloads = ApplicationPaths.long_path(self.root / "data/package-downloads")
+        downloads.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, downloads)
+        archive = self.install(store=False)
+        payload = archive.read_bytes()
+        entry = {
+            "asset_id": 22, "release_id": 11, "tag": "v1", "prerelease": False,
+            "name": "example.botstudio.zip", "size": len(payload),
+            "digest": "sha256:" + hashlib.sha256(payload).hexdigest(),
+            "uploader": self.creator,
+        }
+        catalog = {
+            "repository": GitHubCatalogService.REPOSITORY, "repository_id": 10,
+            "entries": [entry], "local_profiles": read_json(self.root / "profiles/profiles.json"),
+        }
+        service = GitHubCatalogService(
+            request=Mock(return_value=Mock(status_code=200, iter_content=Mock(return_value=[payload]))),
+            credentials=Mock(load=Mock(return_value=None)),
+        )
+        with patch("ui.widgets.managed_packages_dialog.get_logger", return_value=Mock()):
+            dialog = ManagedPackagesDialog(service=self.managed, activation_service=self.activation, embedded=True)
+        self.addCleanup(dialog.deleteLater)
+        dialog._catalog_loaded(catalog)
+        dialog.catalog_entries.setCurrentItem(dialog.catalog_entries.topLevelItem(0).child(0).child(0))
+        with (
+            patch.object(service, "load", return_value=catalog),
+            patch("ui.widgets.managed_packages_dialog.GitHubCatalogService", return_value=service),
+            patch("ui.widgets.managed_packages_dialog.QFileDialog.getSaveFileName") as picker,
+        ):
+            for _ in range(2):
+                dialog.catalog_download.click()
+                self.wait(dialog)
+                self.assertEqual(t("packages.download_complete"), dialog.status.text())
+                self.assertIsNone(dialog.confirmation)
+                self.assertIsNone(dialog.activation_progress)
+            picker.assert_not_called()
+        self.assertEqual(4, len(list((self.root / "data/functions/game").glob("*.json"))))
+        preserved = list(ApplicationPaths.long_path(self.root / "data/package-downloads").glob("*"))
+        self.assertEqual(2, len(preserved))
+        for directory in preserved:
+            installed = ManagedPackageService(directory, self.packages).list_installations()
+            self.assertEqual(1, len(installed))
+            self.assertEqual(10, installed[0]["catalog_source"]["repository_id"])
+        self.assertEqual([], self.managed.list_installations())
+
+    def test_event_catalog_requires_target_only_for_multiple_matching_profiles(self):
+        entry = {
+            "asset_id": 22, "release_id": 11, "tag": "v1", "prerelease": False,
+            "name": "event.botstudio.zip", "size": 100, "uploader": self.creator,
+            "package": {
+                "game_id": "game", "package_id": "event-example", "version": "1.0.0",
+                "publisher": self.creator, "package_type": "event",
+            },
+        }
+        profiles = read_json(self.root / "profiles/profiles.json")
+        profiles.append({"id": "second", "game": "game", "name": "Second"})
+        catalog = {
+            "repository": "pernerch/botstudio-catalog", "repository_id": 10,
+            "entries": [entry], "local_profiles": profiles,
+        }
+        with patch("ui.widgets.managed_packages_dialog.get_logger", return_value=Mock()):
+            dialog = ManagedPackagesDialog(service=self.managed, activation_service=self.activation)
+        self.addCleanup(dialog.deleteLater)
+        dialog._catalog_loaded(catalog)
+
+        def select_event():
+            item = dialog.catalog_entries.topLevelItem(0)
+            while item.childCount():
+                item = item.child(0)
+            dialog.catalog_entries.setCurrentItem(item)
+
+        select_event()
+        self.assertEqual(3, dialog.catalog_profile.count())
+        self.assertEqual("", dialog.catalog_profile.currentData())
+        with patch("ui.widgets.managed_packages_dialog.GitHubCatalogService") as service:
+            dialog.catalog_download.click()
+            service.assert_not_called()
+        self.assertIn(t("packages.profile_required"), dialog.status.text())
+        dialog._catalog_page_loaded({key: value for key, value in catalog.items() if key != "local_profiles"})
+        select_event()
+        self.assertEqual(3, dialog.catalog_profile.count())
+        dialog.catalog_profile.setCurrentIndex(2)
+        self.assertEqual("second", dialog.catalog_profile.currentData())
 
     def test_active_import_roundtrip_assets_provenance_dependencies_and_disabled_events(self):
         status = self.install()

@@ -19,6 +19,8 @@ from services.library_service import LibraryService
 from services.package_license_service import PackagePreparationService
 from services.variable_service import VariableService
 from services.application_info import APP_VERSION
+from services.application_paths import ApplicationPaths
+from services.file_io import read_json
 
 
 PACKAGE_FORMAT = "botstudio-package"
@@ -485,9 +487,12 @@ class PackageService:
         for identity, origin in origins.items():
             installation_id = hashlib.sha256(json.dumps(identity).encode("utf-8")).hexdigest()
             generations = self.function_root.parent / "packages" / installation_id / "generations"
+            archives = list(generations.glob("*\\original.botstudio.zip"))
+            downloads = ApplicationPaths.long_path(self.function_root.parent / "package-downloads")
+            archives.extend(downloads.glob(f"*\\{installation_id}\\generations\\*\\original.botstudio.zip"))
             selected = None
             selected_archive = None
-            for archive in generations.glob("*\\original.botstudio.zip"):
+            for archive in archives:
                 if archive.is_symlink() or archive.parent.is_symlink():
                     raise PackageError("preserved package source may not be a link")
                 manifest = self.inspect_package(str(archive))
@@ -509,6 +514,25 @@ class PackageService:
             result.append((selected, selected_archive))
         return result
 
+    def matches_publication_source(self, manifest: dict, source_id: str, package_type: str) -> bool:
+        if manifest.get("package_type") != package_type:
+            return False
+        if manifest.get("source_id") == source_id:
+            return True
+        details = manifest["package_metadata"]
+        area = "scheduler" if package_type == "event" else "functions"
+        for path in (self.function_root.parent / "package-activations").glob("*.json"):
+            receipt = read_json(path)
+            if (
+                receipt.get("game_id") == manifest["game"]["id"]
+                and receipt.get("package_id") == details["package_id"]
+                and receipt.get("version") == details["package_version"]
+                and receipt.get("publisher_key") == self.publisher_identity_key(details["publisher"])
+                and (receipt.get("copied_identities") or {}).get(area, {}).get(manifest.get("source_id")) == source_id
+            ):
+                return True
+        return False
+
     def _publication_metadata(
         self, base: dict | None, functions: list[BotFunction], game_id: str,
         package_type: str, source_id: str, account: GitHubAccount,
@@ -521,9 +545,8 @@ class PackageService:
         sources = [source[0] for source in self.publication_sources(functions)]
         matching = [
             source for source in sources
-            if source.get("package_type") == package_type
+            if self.matches_publication_source(source, source_id, package_type)
             and source["game"]["id"] == game_id
-            and source.get("source_id") == source_id
         ]
         if len(matching) > 1:
             raise PackageError("multiple source package channels match; select an unambiguous source")

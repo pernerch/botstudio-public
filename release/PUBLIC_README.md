@@ -23,13 +23,27 @@ This repository starts with a clean snapshot of the current application
 source. It does not contain the private development history, credentials,
 profiles, game accounts, user packages, logs, backups or old test installers.
 
-Beta 1 uses version **0.1.0.8** and is published as a GitHub **prerelease**,
+Beta 1 uses version **0.1.0.9** and is published as a GitHub **prerelease**,
 not a stable release. Download the installer and its source/notice companions
 from [Releases](https://github.com/pernerch/botstudio-public/releases).
 Keep backups and use separate test data. Real two-machine/two-account game
 acceptance is an open beta task.
 
-Version 0.1.0.8 improves package source grouping, Event/Function/Helper
+Version 0.1.0.9 simplifies package exchange: **Check and pack** validates and
+creates the archive automatically, then keeps it in a persistent prepared-package
+list with an **Upload to GitHub** action. Confirm redistribution rights before
+packing; uploads submit publicly to the catalog review.
+
+Catalog downloads are verified, unpacked and added directly to the normal
+Function/Event lists. Existing content is never overwritten: duplicate names
+receive numbered suffixes and conflicting internal IDs are remapped with their
+dependencies. Imported Events stay disabled. Select a target profile when
+multiple local profiles match; a single matching profile is selected automatically.
+The Game must exist locally. Incompatible variable definitions fail visibly
+without active partial imports. Preserved originals retain license, description
+and attribution for later editing and republication.
+
+The preceding 0.1.0.8 update improved package source grouping, Event/Function/Helper
 selection, catalog names/search/author display, unchanged-publication checks
 and Function-editor End connection stubs. Package exports share byte-identical
 sample screenshots within each Library entry without removing distinct images,

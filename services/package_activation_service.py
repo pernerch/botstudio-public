@@ -7,7 +7,7 @@ import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import shutil
 import tempfile
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from PySide6.QtCore import QLockFile
 
@@ -253,8 +253,12 @@ class PackageActivationService:
             raise PackageError(f"Library asset is missing: {entry_id}/{relative}")
         return str(destination / relative)
 
-    def _stage(self, installation_id, profile_id, temporary, updating=False):
+    def _stage(self, installation_id, profile_id, temporary, updating=False, copying=False):
+        source_installation_id = installation_id
         status = self.managed.status(installation_id)
+        if copying:
+            status = dict(status, installation_id=hashlib.sha256(uuid4().bytes).hexdigest())
+            installation_id = status["installation_id"]
         game_id = self._identifier(status["game_id"])
         receipt_path = f"data/package-activations/{installation_id}.json"
         previous_receipt, receipt_bytes = self._read_receipt(status)
@@ -275,6 +279,10 @@ class PackageActivationService:
             for name in ("games/games.json", "profiles/profiles.json")
         }
         profiles = self._local_context(game_id)
+        if copying and not profile_id:
+            candidates = [profile for profile in profiles if profile["id"]]
+            if len(candidates) == 1:
+                profile_id = candidates[0]["id"]
         source = Path(status["working_directory"])
         source_snapshot = ManagedPackageService._snapshot(source)
         content = temporary / "content"
@@ -285,7 +293,8 @@ class PackageActivationService:
             or {name: digest for name, digest in source_snapshot.items() if name.startswith("content/")} != copied_snapshot
         ):
             raise PackageError("package working copy changed while preparing import")
-        if any(path.name not in {"functions", "library", "scheduler", "variables"} for path in content.iterdir()):
+        copied_identities = self._copy_content(content, game_id) if copying else None
+        if any(path.name not in {"functions", "library", "scheduler", "variables", "package-assets"} for path in content.iterdir()):
             raise PackageError("unsupported active package content")
         # Non-content files remain part of consent, but are never activated.
         for area in ("functions", "library", "scheduler", "variables"):
@@ -532,6 +541,10 @@ class PackageActivationService:
             "active_files": active_files,
             "variable_definitions": [entry for entry in definitions if entry["name"].casefold() in definition_names],
         }
+        if copying:
+            receipt["source_installation_id"] = source_installation_id
+            receipt["source_archive"] = status["original_archive"]
+            receipt["copied_identities"] = copied_identities
         writes[receipt_path] = json.dumps(receipt, indent=2, sort_keys=True).encode("utf-8")
         before[receipt_path] = receipt_bytes if updating else None
         if self._bytes(self._receipt_path(installation_id)) != receipt_bytes:
@@ -551,6 +564,139 @@ class PackageActivationService:
                 raise PackageError("package activation recovery is pending; restart Studio before continuing")
             with tempfile.TemporaryDirectory(prefix="stage-", dir=self.journal_root) as temporary:
                 return self._stage(installation_id, "", Path(temporary), updating=True)[0]
+
+    def import_copy(self, installation_id, profile_id=""):
+        """One user download creates independent, non-overwriting active content."""
+        if self.execution_guard is None:
+            raise PackageError("Runtime exclusion guard is required for active imports")
+        with self.execution_guard(), self._locked():
+            self._recover()
+            with tempfile.TemporaryDirectory(prefix="copy-", dir=self.journal_root) as temporary:
+                summary, writes, before = self._stage(
+                    installation_id, profile_id, Path(temporary), copying=True,
+                )
+                self._commit(writes, before)
+                return summary
+
+    def _copy_content(self, content, game_id):
+        function_root = content / "functions" / game_id
+        library_root = content / "library"
+        event_root = content / "scheduler" / game_id
+        function_files = sorted(function_root.glob("*.json"))
+        library_dirs = sorted(path for path in library_root.iterdir() if path.is_dir()) if library_root.exists() else []
+        event_files = sorted(event_root.glob("*.json"))
+        function_ids = {
+            path.stem: str(uuid4()) if self._target(f"data/functions/{game_id}/{path.name}").exists() else path.stem
+            for path in function_files
+        }
+        library_ids = {
+            path.name: str(uuid4()) if self._target(f"data/library/{path.name}").exists() else path.name
+            for path in library_dirs
+        }
+        event_ids = {
+            path.stem: str(uuid4()) if self._target(f"data/scheduler/{game_id}/{path.name}").exists() else path.stem
+            for path in event_files
+        }
+
+        def names_in(area):
+            directory = self.root / "data" / area / game_id
+            return {
+                str(read_json(path).get("name", "")).casefold()
+                for path in directory.glob("*.json")
+            }
+
+        function_names = names_in("functions")
+        event_names = names_in("scheduler")
+
+        def unique_name(value, names):
+            name = str(value).strip()
+            if not name:
+                raise PackageError("imported content requires a display name")
+            candidate, number = name, 2
+            while candidate.casefold() in names:
+                candidate = f"{name} {number}"
+                number += 1
+            names.add(candidate.casefold())
+            return candidate
+
+        for path in function_files:
+            data = read_json(path)
+            if not isinstance(data, dict) or data.get("saved") is not True:
+                raise PackageError("active packages require saved Functions")
+            blocks = data.get("blocks") or []
+            if not isinstance(blocks, list):
+                raise PackageError("packaged Function blocks must be a list")
+            pending = list(blocks)
+            while pending:
+                block = pending.pop()
+                if not isinstance(block, dict) or not isinstance(block.get("block_id"), str) or not block["block_id"]:
+                    raise PackageError("packaged Function blocks require explicit identities")
+                for children in (block.get("branches") or {}).values():
+                    pending.extend(child for child in children if isinstance(child, dict))
+            function = BotFunction.from_dict(data)
+            if function.function_id != path.stem or function.game_id != game_id:
+                raise PackageError("Function identity does not match package path/game")
+            function.function_id = function_ids[path.stem]
+            function.name = unique_name(function.name, function_names)
+            function.used, function.used_by = [], []
+            for block in function.walk_blocks():
+                for key, identities in (("function_id", function_ids), ("library_entry_id", library_ids)):
+                    if block.params.get(key) in identities:
+                        block.params[key] = identities[block.params[key]]
+            for dependency in function.helper_dependencies:
+                if dependency.function_id in function_ids:
+                    dependency.function_id = function_ids[dependency.function_id]
+            function.library_entries = function.collect_library_entries()
+            atomic_write_json(path.with_name(function.function_id + ".json"), function.to_dict())
+            if path.stem != function.function_id:
+                path.unlink()
+
+        for directory in library_dirs:
+            data = read_json(directory / "entry.json")
+            if not isinstance(data, dict) or data.get("entry_id") != directory.name:
+                raise PackageError("Library entry identity does not match package path")
+            new_id = library_ids[directory.name]
+            data["entry_id"], data["used_by"] = new_id, []
+
+            def relocated(value):
+                old_path = self._asset_path(value, directory.name, directory, directory)
+                return str(Path(new_id) / Path(old_path).relative_to(directory))
+
+            pattern = data.get("pattern")
+            if not isinstance(pattern, dict):
+                raise PackageError("Library pattern is required")
+            pattern["reference_path"] = relocated(pattern.get("reference_path") or "pattern_reference.png")
+            for field in ("accepted_samples", "rejected_samples"):
+                for sample in data.get(field, []):
+                    for key in ("source", "crop", "match"):
+                        if sample.get(key):
+                            sample[key] = relocated(sample[key])
+            atomic_write_json(directory / "entry.json", data)
+            if new_id != directory.name:
+                directory.rename(directory.with_name(new_id))
+
+        for path in event_files:
+            data = read_json(path)
+            if not isinstance(data, dict) or data.get("event_id") != path.stem or data.get("game_id") != game_id:
+                raise PackageError("Event identity does not match package path/game")
+            tasks = data.get("tasks")
+            if not isinstance(tasks, list) or any(
+                not isinstance(task, dict) or not task.get("task_id") for task in tasks
+            ):
+                raise PackageError("packaged Event Tasks require explicit identities")
+            ids = [self._identifier(task["task_id"]) for task in tasks]
+            if len({value.casefold() for value in ids}) != len(ids):
+                raise PackageError("packaged Event Task identities must be unique")
+            event = Event.from_dict(data)
+            event.event_id = event_ids[path.stem]
+            event.name = unique_name(event.name, event_names)
+            for task in event.tasks:
+                task.task_id = str(uuid4())
+                task.function_ids = [function_ids.get(value, value) for value in task.function_ids]
+            atomic_write_json(path.with_name(event.event_id + ".json"), event.to_dict())
+            if path.stem != event.event_id:
+                path.unlink()
+        return {"functions": function_ids, "scheduler": event_ids}
 
     def update(self, installation_id, expected_plan):
         return self.activate(installation_id, "", expected_plan, updating=True)

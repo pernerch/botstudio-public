@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
 )
 
 from services.package_service import PackageError, PackageService
+from services.package_outbox_service import PackageOutboxService
 from models.bot_function import FUNCTION_KIND_HELPER
 from services.package_description_service import PackageDescriptionService
 from services.package_license_service import PackageLicenseError
@@ -51,6 +52,8 @@ class PackagePreparationDialog(QDialog):
         description_service=None,
         auth_service=None,
         catalog_service=None,
+        simple_flow=False,
+        outbox_service=None,
     ):
         super().__init__(parent)
         self.package_service = package_service or PackageService()
@@ -59,6 +62,9 @@ class PackagePreparationDialog(QDialog):
         self.description_service = description_service or PackageDescriptionService()
         self.auth_service = auth_service or GitHubAuthService()
         self.catalog_service = catalog_service or GitHubCatalogService()
+        self.simple_flow = simple_flow
+        self.outbox_service = outbox_service or PackageOutboxService(self.package_service)
+        self._pack_requested = False
         self._source_descriptions = {}
         self._source_names = {}
         self._draft_key = None
@@ -104,6 +110,8 @@ class PackagePreparationDialog(QDialog):
         layout.addWidget(self.catalog_status)
 
         self.preview_button = QPushButton(t("packages.prepare_preview"))
+        if simple_flow:
+            self.preview_button.setText(t("packages.check_pack"))
         layout.addWidget(self.preview_button)
         self.details = QTextBrowser()
         self.details.setOpenLinks(False)
@@ -112,6 +120,8 @@ class PackagePreparationDialog(QDialog):
         layout.addWidget(self.details, stretch=1)
 
         self.rights = QCheckBox(t("packages.prepare_rights"))
+        if simple_flow:
+            self.rights.setText(t("packages.pack_rights"))
         self.rights.setEnabled(False)
         layout.addWidget(self.rights)
         self.status = QLabel()
@@ -121,6 +131,7 @@ class PackagePreparationDialog(QDialog):
         buttons = QHBoxLayout()
         self.prepare_button = QPushButton(t("packages.prepare_zip"))
         self.prepare_button.setEnabled(False)
+        self.prepare_button.setVisible(not simple_flow)
         self.close_button = QPushButton(t("common.close"))
         buttons.addWidget(self.prepare_button)
         buttons.addWidget(self.close_button)
@@ -134,7 +145,7 @@ class PackagePreparationDialog(QDialog):
         self.version.textChanged.connect(self._invalidate_preview)
         self.description_button.clicked.connect(self._edit_description)
         self.rights.toggled.connect(self._update_controls)
-        self.preview_button.clicked.connect(self._preview_package)
+        self.preview_button.clicked.connect(self._check_and_pack if simple_flow else self._preview_package)
         self.prepare_button.clicked.connect(self._choose_destination)
         self.close_button.clicked.connect(self.reject)
 
@@ -152,6 +163,7 @@ class PackagePreparationDialog(QDialog):
     def _finished(self, result, error):
         self._set_busy(False)
         if error:
+            self._pack_requested = False
             self.status.setText(t("packages.prepare_failed").format(error=error))
             return
         if self._completion:
@@ -305,9 +317,10 @@ class PackagePreparationDialog(QDialog):
         matching = [
             (manifest, path)
             for manifest, path in self.package_service.publication_sources(functions)
-            if manifest.get("package_type") in (
-                ("function", "helper") if kind == "function" else ("event",)
-            ) and manifest.get("source_id") == source_id
+            if any(
+                self.package_service.matches_publication_source(manifest, source_id, package_type)
+                for package_type in (("function", "helper") if kind == "function" else ("event",))
+            )
         ]
         if len(matching) > 1:
             raise PackageError("multiple source package channels match the description")
@@ -458,6 +471,8 @@ class PackagePreparationDialog(QDialog):
         else:
             lines.extend(["", t("packages.prepare_ready")])
         self.details.setPlainText("\n".join(lines))
+        if self.simple_flow:
+            self.details.setPlainText(PackageService.manifest_markdown(manifest))
         self.rights.setEnabled(self._ready)
         self.status.setText(
             t("packages.prepare_review")
@@ -465,6 +480,17 @@ class PackagePreparationDialog(QDialog):
             else t("packages.prepare_not_ready").format(reason=readiness_error)
         )
         self._update_controls()
+        if self._pack_requested:
+            self._pack_requested = False
+            if self._ready:
+                self.rights.setChecked(True)
+                self._choose_destination()
+
+    def _check_and_pack(self):
+        if not self.rights.isChecked():
+            return
+        self._pack_requested = True
+        self._preview_package()
 
     def _choose_destination(self):
         if not self._preview or not self._ready or not self.rights.isChecked():
@@ -475,12 +501,16 @@ class PackagePreparationDialog(QDialog):
             for character in package_name
         ).strip(" .")
         suggested_name = f"{default_name or 'package'}.botstudio.zip"
-        destination, _ = QFileDialog.getSaveFileName(
-            self,
-            t("packages.prepare_destination"),
-            suggested_name,
-            "BotStudio (*.botstudio.zip)",
-        )
+        destination = ""
+        if not self.simple_flow:
+            destination, _ = QFileDialog.getSaveFileName(
+                self,
+                t("packages.prepare_destination"),
+                suggested_name,
+                "BotStudio (*.botstudio.zip)",
+            )
+        else:
+            destination = suggested_name
         if not destination:
             return
         output = Path(destination)
@@ -504,6 +534,7 @@ class PackagePreparationDialog(QDialog):
         package_assets = dict(self.package_assets)
 
         def create_archive():
+            archive_output = self.outbox_service.destination(package_name) if self.simple_flow else output
             account = self.auth_service.restore()
             if account is None or account.to_dict() != manifest_metadata["publisher"]:
                 raise PackageError(t("packages.prepare_catalog_sign_in"))
@@ -541,7 +572,7 @@ class PackagePreparationDialog(QDialog):
                     )
                 return self.package_service.create_ready_archive(
                     str(ready_directory),
-                    str(output),
+                    str(archive_output),
                     expected_checksums=preview["checksums"],
                 )
 
@@ -551,20 +582,23 @@ class PackagePreparationDialog(QDialog):
         self.status.setText(
             t("packages.prepare_complete").format(path=output)
         )
-        QMessageBox.information(
-            self,
-            t("packages.prepare_title"),
-            t("packages.prepare_complete").format(path=output),
-        )
+        if not self.simple_flow:
+            QMessageBox.information(
+                self,
+                t("packages.prepare_title"),
+                t("packages.prepare_complete").format(path=output),
+            )
         self.accept()
 
     def _update_controls(self):
         has_source = bool(self.source.currentData()) and self._draft_ready
         self.description_button.setEnabled(not self._busy and has_source)
-        self.preview_button.setEnabled(not self._busy and has_source)
+        self.preview_button.setEnabled(
+            not self._busy and has_source and (not self.simple_flow or self.rights.isChecked())
+        )
         self.prepare_button.setEnabled(
             not self._busy and self._preview is not None and self._ready
             and self.rights.isChecked()
         )
-        self.rights.setEnabled(not self._busy and self._ready)
+        self.rights.setEnabled(not self._busy and (has_source if self.simple_flow else self._ready))
         self.close_button.setEnabled(not self._busy)

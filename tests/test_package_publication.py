@@ -2,6 +2,7 @@ from contextlib import contextmanager
 import faulthandler
 import hashlib
 import json
+import shutil
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -15,6 +16,8 @@ from services.catalog_submission_service import CatalogSubmissionService
 from services.package_activation_service import PackageActivationService
 from services.package_license_service import PackageLicenseService, PackagePreparationService
 from services.package_service import PackageError, PackageService
+from services.application_paths import ApplicationPaths
+from services.file_io import atomic_write_json, read_json
 
 
 class MemoryConfig:
@@ -120,6 +123,45 @@ class PackagePublicationTests(unittest.TestCase):
         self.assertEqual(old["license_text"], new["license_text"])
         self.assertNotIn("fork_of", new)
         self.assertEqual(self.owner, self.b.load_saved_function("game", "function").creator_account)
+        self.b.inspect_package(str(updated_archive))
+
+    def test_automatic_download_copy_can_republish_with_original_terms_and_description_source(self):
+        self.function.description = "Original package description"
+        self.save(self.a, self.function)
+        archive, original = self.archive(self.a, self.function, self.owner, "copy-source")
+        root = self.b.function_root.parent.parent
+        atomic_write_json(root / "games/games.json", [{"id": "game"}])
+        atomic_write_json(root / "profiles/profiles.json", [])
+        downloads = ApplicationPaths.long_path(root / "data/package-downloads")
+        downloads.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, downloads)
+        managed = ManagedPackageService(downloads / "example", self.b)
+        status = managed.install(archive)
+
+        @contextmanager
+        def guard():
+            yield
+
+        activation = PackageActivationService(root=root, managed=managed, execution_guard=guard, logger=Mock())
+        activation.import_copy(status["installation_id"])
+        first = self.b.load_saved_function("game", "function")
+        unchanged = self.b.preview_function_package(first, publication_account=self.owner)
+        self.assertEqual(self.a.archive_content_fingerprint(archive), unchanged["content_fingerprint"])
+        activation.import_copy(status["installation_id"])
+        functions = [
+            BotFunction.from_dict(read_json(path))
+            for path in (root / "data/functions/game").glob("*.json")
+        ]
+        imported = next(function for function in functions if function.name == "Example 2")
+        sources = self.b.publication_sources([imported])
+        self.assertEqual(1, len(sources))
+        self.assertEqual("Original package description", sources[0][0]["description"])
+        self.assertTrue(self.b.matches_publication_source(sources[0][0], imported.function_id, "function"))
+        imported.bump_revision("Correction", account=self.owner)
+        updated_archive, updated = self.archive(self.b, imported, self.owner, "copy-updated")
+        self.assertEqual(original["package_metadata"]["package_id"], updated["package_metadata"]["package_id"])
+        self.assertEqual("1.0.8", updated["package_metadata"]["package_version"])
+        self.assertEqual(original["package_metadata"]["license_text"], updated["package_metadata"]["license_text"])
         self.b.inspect_package(str(updated_archive))
 
     def test_same_account_roundtrip_version_bump_is_not_new_publication_content(self):
@@ -264,3 +306,23 @@ class PackagePublicationTests(unittest.TestCase):
             preview["manifest"]["package_metadata"]["package_id"],
             updated["manifest"]["package_metadata"]["package_id"],
         )
+        atomic_write_json(root / "profiles/profiles.json", [{"id": "local", "game": "game"}])
+
+        @contextmanager
+        def guard():
+            yield
+
+        activation = PackageActivationService(root=root, managed=managed, execution_guard=guard, logger=Mock())
+        activation.import_copy(status["installation_id"])
+        activation.import_copy(status["installation_id"])
+        events = [
+            Event.from_dict(read_json(path))
+            for path in (root / "data/scheduler/game").glob("*.json")
+        ]
+        copied = next(value for value in events if value.name == "Event 2")
+        copy_preview = self.b.preview_event_package(copied, publication_account=self.owner)
+        self.assertEqual(
+            preview["manifest"]["package_metadata"]["package_id"],
+            copy_preview["manifest"]["package_metadata"]["package_id"],
+        )
+        self.assertEqual("1.0.8", copy_preview["manifest"]["package_metadata"]["package_version"])
