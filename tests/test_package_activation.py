@@ -439,6 +439,51 @@ class PackageActivationTests(TestCase):
             self.prepare(status)
         self.assertEqual(before, self.active_snapshot())
 
+    def test_copy_reuses_independently_created_interrupt_and_preserves_local_state(self):
+        variables = VariableService(
+            root=str(self.root / "data/variables"),
+            logger=Mock(), reinitialize_service=ReinitializeService(),
+        )
+        local = variables.ensure_global("game", "Interrupt", description="Event Output: Interrupt")
+        variables.set_profile_value("game", "technical-local", "Interrupt", True)
+        profile = self.root / "data/variables/game/profiles/technical-local.json"
+        before_profile = profile.read_bytes()
+        incoming = {**local, "variable_id": "publisher-interrupt-id"}
+        status = self.install(definitions=self.definitions + [incoming])
+        self.assertFalse((self.root / "data/functions").exists())
+        self.activation.import_copy(status["installation_id"], "technical-local")
+        self.assertEqual(local, variables.get_definition("game", "Interrupt"))
+        self.assertEqual(before_profile, profile.read_bytes())
+        self.activation.import_copy(status["installation_id"], "technical-local")
+        self.assertEqual(local, variables.get_definition("game", "Interrupt"))
+        self.assertEqual(before_profile, profile.read_bytes())
+
+    def test_copy_reuses_variable_contract_with_local_identity_name_and_display_metadata(self):
+        local = {
+            **self.definitions[0], "variable_id": "local-setting-id",
+            "name": "Setting", "description": "Local description", "debug_visible": True,
+        }
+        registry = self.root / "data/variables/game/variables.json"
+        atomic_write_json(registry, [local])
+        status = self.install(event=False)
+        self.activation.import_copy(status["installation_id"])
+        self.assertEqual([local], read_json(registry))
+
+    def test_copy_rejects_incompatible_contract_even_with_different_variable_id(self):
+        status = self.install(event=False)
+        for field, value in (
+            ("kind", "live"), ("value_type", "text"), ("initial_value", 99),
+            ("writable_by_functions", True), ("field_target", "event"),
+        ):
+            with self.subTest(field=field):
+                registry = self.root / "data/variables/game/variables.json"
+                local = {**self.definitions[0], "variable_id": "local-setting-id", field: value}
+                atomic_write_json(registry, [local])
+                before = self.active_snapshot()
+                with self.assertRaisesRegex(PackageError, "variable definition conflicts"):
+                    self.activation.import_copy(status["installation_id"])
+                self.assertEqual(before, self.active_snapshot())
+
     def test_shared_sample_sources_activate_verify_and_reteach(self):
         def optimize(content):
             name = "content/library/image/entry.json"

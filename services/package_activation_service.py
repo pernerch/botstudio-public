@@ -406,7 +406,11 @@ class PackageActivationService:
         for entry in incoming:
             previous = by_name.get(entry["name"].casefold())
             if previous is not None:
-                if entry != previous:
+                local_metadata = {"variable_id", "name", "description", "debug_visible"}
+                if (
+                    {key: value for key, value in entry.items() if key not in local_metadata}
+                    != {key: value for key, value in previous.items() if key not in local_metadata}
+                ):
                     raise PackageError(f"variable definition conflicts with local data: {entry['name']}")
             else:
                 if any(item["variable_id"] == entry["variable_id"] for item in existing):

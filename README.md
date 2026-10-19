@@ -23,13 +23,21 @@ This repository starts with a clean snapshot of the current application
 source. It does not contain the private development history, credentials,
 profiles, game accounts, user packages, logs, backups or old test installers.
 
-Beta 1 uses version **0.1.0.11** and is published as a GitHub **prerelease**,
+Beta 1 uses version **0.1.0.12** and is published as a GitHub **prerelease**,
 not a stable release. Download the installer and its source/notice companions
 from [Releases](https://github.com/pernerch/botstudio-public/releases).
 Keep backups and use separate test data. Real two-machine/two-account game
 acceptance is an open beta task.
 
-Version 0.1.0.11 adds a shared GitHub Game directory. Select a Game from the
+Version 0.1.0.12 fixes package imports into an otherwise empty Studio:
+automatically created variables such as Interrupt keep their local identity and
+values when the incoming definition has the same contract. Local descriptions
+and debug visibility are also preserved; incompatible definitions still fail
+without partial imports. Updated catalog packages are tested independently and
+together, including complete Journey of Light Library dependencies. Superseded
+faulty releases are withdrawn from public release downloads.
+
+Version 0.1.0.11 added a shared GitHub Game directory. Select a Game from the
 searchable list in Game Setup instead of entering a technical ID. New Games
 can be registered directly using the public GitHub contribution authorization,
 without manual approval. Existing Games and published packages keep their
