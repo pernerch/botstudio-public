@@ -1,4 +1,5 @@
 from pathlib import Path
+from collections.abc import Callable
 import subprocess
 from core.command_control import run_command
 
@@ -24,11 +25,14 @@ class AdbService:
 
     def __init__(
         self,
-        adb_path: str,
+        adb_path: str | Callable[[], str],
     ):
-        self.adb_path = Path(
-            adb_path
-        )
+        self._adb_path = adb_path
+
+    @property
+    def adb_path(self) -> Path:
+        value = self._adb_path() if callable(self._adb_path) else self._adb_path
+        return Path(value)
 
     def _run(
         self,

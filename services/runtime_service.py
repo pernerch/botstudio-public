@@ -89,7 +89,7 @@ class RuntimeService:
         )
 
         self.adb_runtime_service = AdbRuntimeService(
-            self.emulator_manager.adb_path,
+            lambda: self.emulator_manager.adb_path,
         )
 
         self.emulator_health_service = EmulatorHealthService(
@@ -102,7 +102,7 @@ class RuntimeService:
         self.execution_activity = get_execution_activity()
 
         self.game_runtime_service = GameRuntimeService(
-            self.emulator_manager.adb_path,
+            lambda: self.emulator_manager.adb_path,
             self.game_service,
         )
 

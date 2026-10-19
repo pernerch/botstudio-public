@@ -1,4 +1,5 @@
 from PySide6.QtWidgets import (
+    QDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -14,6 +15,7 @@ from PySide6.QtWidgets import (
 
 from services.game_service import GameService
 from ui.i18n.translator import t
+from ui.widgets.emulator_setup_dialog import EmulatorSetupDialog
 
 
 class GameSetupView(QWidget):
@@ -134,25 +136,22 @@ class GameSetupView(QWidget):
         self,
     ):
 
-        package_name = self.game_service.detect_package(
-            self.emulator_instance.value()
+        instance = self.emulator_instance.value()
+        dialog = EmulatorSetupDialog(
+            self.game_service.emulator_manager,
+            self,
+            operation=lambda: self.game_service.detect_package(instance),
         )
-
-        if not package_name:
-
+        try:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                self.status.setText(t("game_setup.package_not_detected"))
+                return
+            self.package_name.setText(dialog.package_name)
             self.status.setText(
-                t("game_setup.package_not_detected")
+                t("game_setup.package_detected")
             )
-
-            return
-
-        self.package_name.setText(
-            package_name
-        )
-
-        self.status.setText(
-            t("game_setup.package_detected")
-        )
+        finally:
+            dialog.deleteLater()
 
     def save_game(
         self,

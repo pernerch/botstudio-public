@@ -1689,6 +1689,33 @@ STRINGS = {
         "game_setup.package_detected":
             "Package detected.",
 
+        "emulator_setup.title":
+            "MuMu connection",
+        "emulator_setup.choose_folder":
+            "Select MuMu Player folder",
+        "emulator_setup.retry":
+            "Try again",
+        "emulator_setup.searching":
+            "Checking MuMu and ADB, including subfolders. Please wait...",
+        "emulator_setup.select_folder":
+            "Select your MuMu Player installation folder. BotStudio will find MuMuManager.exe and adb.exe automatically.",
+        "emulator_setup.manager_missing":
+            "MuMuManager.exe was not found. Select the MuMu Player installation folder.",
+        "emulator_setup.manager_ambiguous":
+            "Several MuMu installations were found. Select the folder of the installation you want to use.",
+        "emulator_setup.adb_missing":
+            "adb.exe was not found in this MuMu Player folder or its subfolders. Select the complete installation folder.",
+        "emulator_setup.adb_invalid":
+            "The ADB tool could not be started or validated. Check the MuMu installation and try again.",
+        "emulator_setup.search_limit":
+            "The search limit was reached. Select a more specific MuMu Player installation folder.",
+        "emulator_setup.search_failed":
+            "The MuMu folder could not be searched. Check folder access and try again.",
+        "emulator_setup.package_missing":
+            "No foreground game was detected. Open the game on the selected MuMu instance and try again.",
+        "emulator_setup.failed":
+            "The MuMu connection failed. Check that the selected instance is running with ADB enabled, then try again.",
+
         "game_setup.missing_fields":
             "Game ID, display name and package name are required.",
 

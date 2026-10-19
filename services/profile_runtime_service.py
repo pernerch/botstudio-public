@@ -27,7 +27,7 @@ class ProfileRuntimeService:
 
         self.adb_service = (
             AdbService(
-                self.emulator_manager.adb_path
+                lambda: self.emulator_manager.adb_path
             )
         )
 

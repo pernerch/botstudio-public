@@ -42,14 +42,14 @@ class ProfileEmulatorBar(QWidget):
         self.logger = logger or get_logger("runtime")
 
         self.adb_runtime_service = AdbRuntimeService(
-            self.emulator_manager.adb_path
+            lambda: self.emulator_manager.adb_path
         )
         self.health_service = EmulatorHealthService(
             self.emulator_manager,
             self.adb_runtime_service,
         )
         self.game_runtime_service = GameRuntimeService(
-            self.emulator_manager.adb_path,
+            lambda: self.emulator_manager.adb_path,
             self.game_service,
         )
         self.recovery_service = RuntimeRecoveryService(

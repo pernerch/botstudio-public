@@ -23,13 +23,18 @@ This repository starts with a clean snapshot of the current application
 source. It does not contain the private development history, credentials,
 profiles, game accounts, user packages, logs, backups or old test installers.
 
-Beta 1 uses version **0.1.0.9** and is published as a GitHub **prerelease**,
+Beta 1 uses version **0.1.0.10** and is published as a GitHub **prerelease**,
 not a stable release. Download the installer and its source/notice companions
 from [Releases](https://github.com/pernerch/botstudio-public/releases).
 Keep backups and use separate test data. Real two-machine/two-account game
 acceptance is an open beta task.
 
-Version 0.1.0.9 simplifies package exchange: **Check and pack** validates and
+Version 0.1.0.10 adds automatic MuMu ADB setup before Game package detection
+and Runtime start: select the MuMu Player folder when needed, and BotStudio
+finds and checks the required tools, including subfolders. Existing services
+use saved paths without restarting Studio. No ADB executable is bundled.
+
+Version 0.1.0.9 simplified package exchange: **Check and pack** validates and
 creates the archive automatically, then keeps it in a persistent prepared-package
 list with an **Upload to GitHub** action. Confirm redistribution rights before
 packing; uploads submit publicly to the catalog review.
@@ -85,6 +90,21 @@ For the companion watchdog:
 MuMu, ADB and game packages are not included. Configure your own emulator
 and provide your own content. Game images and third-party packages require
 their own redistribution rights.
+
+### MuMu connection setup
+
+Before detecting a Game's package name or starting Runtime, BotStudio checks
+the configured MuMu tools. If setup is missing, select the MuMu Player
+installation folder. BotStudio searches it and its subfolders for
+MuMuManager.exe and adb.exe, checks ADB and saves the paths automatically.
+An existing valid ADB configuration is retained; newly discovered ADB beside
+the manager is preferred over versioned device tools.
+
+Open the target game in the selected emulator instance, then use **Detect
+Package** in Game Setup. BotStudio connects that instance before reading the
+foreground package name. Searches and ADB checks run in the background;
+errors offer folder selection and retry. No separate ADB download or manual
+configuration-file edit is required when the MuMu installation includes ADB.
 
 ## Build
 

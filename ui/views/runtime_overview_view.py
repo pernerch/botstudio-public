@@ -6,11 +6,11 @@ from PySide6.QtGui import QColor
 
 from PySide6.QtWidgets import (
     QCheckBox,
+    QDialog,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QFileDialog,
     QMessageBox,
     QPushButton,
     QTableWidget,
@@ -32,6 +32,7 @@ from services.runtime_service import (
 )
 from services.logging_service import LOG_DIR
 from ui.i18n.translator import t
+from ui.widgets.emulator_setup_dialog import EmulatorSetupDialog
 
 
 class _RuntimeOperationSignals(QObject):
@@ -397,24 +398,14 @@ class RuntimeOverviewView(QWidget):
         if emulator_manager.emulator_type != "mumu":
             return True
 
-        if emulator_manager.mumu_manager_path:
-            return True
-
-        path, _ = QFileDialog.getOpenFileName(
+        dialog = EmulatorSetupDialog(
+            emulator_manager,
             self,
-            t("runtime.select_mumu_manager"),
-            "D:/Program Files/Netease/MuMuPlayer/nx_main",
-            "MuMuManager.exe (MuMuManager.exe);;Executables (*.exe)",
         )
-
-        if not path:
-            return False
-
-        emulator_manager.set_mumu_manager_path(
-            path
-        )
-
-        return True
+        try:
+            return dialog.exec() == QDialog.DialogCode.Accepted
+        finally:
+            dialog.deleteLater()
 
     def _ensure_game_packages_configured(
         self,

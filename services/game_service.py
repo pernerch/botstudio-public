@@ -40,7 +40,7 @@ class GameService:
 
         self.adb_service = (
             AdbService(
-                self.emulator_manager.adb_path
+                lambda: self.emulator_manager.adb_path
             )
         )
 
@@ -334,7 +334,10 @@ class GameService:
             )
         )
 
-        result = self.adb_service.shell(
+        if not self.adb_service.ensure_connection(device_id):
+            raise ConnectionError("Could not connect to the selected MuMu instance.")
+
+        result = self.adb_service.shell_result(
             device_id,
             [
                 "dumpsys",
@@ -342,7 +345,10 @@ class GameService:
             ],
         )
 
-        for line in result.splitlines():
+        if result is None or result.returncode != 0:
+            raise ConnectionError("Could not read the foreground app from MuMu.")
+
+        for line in result.stdout.splitlines():
 
             if (
                 "mCurrentFocus"

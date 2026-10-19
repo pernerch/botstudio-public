@@ -21,7 +21,12 @@ import ctypes
 import io
 import json
 import subprocess
+from threading import RLock
 from core.command_control import run_command
+from services.file_io import atomic_write_json, read_json
+
+
+_CONFIG_LOCK = RLock()
 
 
 def _windows_no_window_kwargs() -> dict:
@@ -70,7 +75,7 @@ class EmulatorManager:
 
         self.adb_service = (
             AdbService(
-                self.adb_path
+                lambda: self.adb_path
             )
         )
 
@@ -78,21 +83,7 @@ class EmulatorManager:
         self,
     ) -> dict:
 
-        if not self.config_file.exists():
-
-            raise FileNotFoundError(
-                self.config_file
-            )
-
-        with open(
-            self.config_file,
-            "r",
-            encoding="utf-8",
-        ) as file:
-
-            return json.load(
-                file
-            )
+        return read_json(self.config_file)
 
     @property
     def emulator_type(
@@ -108,7 +99,7 @@ class EmulatorManager:
         self,
     ) -> str:
 
-        return self.config[
+        return self._load_config()[
             "adb_path"
         ]
 
@@ -117,7 +108,7 @@ class EmulatorManager:
         self,
     ) -> str:
 
-        return self.config.get(
+        return self._load_config().get(
             "mumu_manager_path",
             "",
         )
@@ -127,7 +118,7 @@ class EmulatorManager:
         self,
     ) -> dict:
 
-        return self.config.setdefault(
+        return self._load_config().setdefault(
             "instance_pids",
             {},
         )
@@ -137,7 +128,7 @@ class EmulatorManager:
         self,
     ) -> dict:
 
-        return self.config.setdefault(
+        return self._load_config().setdefault(
             "instance_processes",
             {},
         )
@@ -147,27 +138,19 @@ class EmulatorManager:
         path: str,
     ) -> None:
 
-        self.config[
-            "mumu_manager_path"
-        ] = path
+        self.update_tool_paths(mumu_manager_path=path)
 
-        self._save_config()
+    def update_tool_paths(self, **paths: str) -> None:
+        if not paths or set(paths) - {"adb_path", "mumu_manager_path"}:
+            raise ValueError("Invalid emulator tool settings.")
+        self._update_config(paths)
 
-    def _save_config(
-        self,
-    ) -> None:
-
-        with open(
-            self.config_file,
-            "w",
-            encoding="utf-8",
-        ) as file:
-
-            json.dump(
-                self.config,
-                file,
-                indent=4,
-            )
+    def _update_config(self, values: dict) -> None:
+        with _CONFIG_LOCK:
+            config = read_json(self.config_file)
+            config.update(values)
+            atomic_write_json(self.config_file, config)
+            self.config = config
 
     def validate_instance(
         self,
@@ -451,11 +434,10 @@ class EmulatorManager:
         pid: int,
     ) -> None:
 
-        self.instance_pids[
-            str(instance_number)
-        ] = pid
-
-        self._save_config()
+        with _CONFIG_LOCK:
+            pids = self._load_config().get("instance_pids", {})
+            pids[str(instance_number)] = pid
+            self._update_config({"instance_pids": pids})
 
     def _set_instance_processes(
         self,
@@ -463,11 +445,10 @@ class EmulatorManager:
         pids: list[int],
     ) -> None:
 
-        self.instance_processes[
-            str(instance_number)
-        ] = pids
-
-        self._save_config()
+        with _CONFIG_LOCK:
+            processes = self._load_config().get("instance_processes", {})
+            processes[str(instance_number)] = pids
+            self._update_config({"instance_processes": processes})
 
     def start_instance(
         self,

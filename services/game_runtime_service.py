@@ -1,4 +1,5 @@
 from core.adb_service import AdbService
+from collections.abc import Callable
 from services.logging_service import get_logger
 
 
@@ -6,7 +7,7 @@ class GameRuntimeService:
 
     def __init__(
         self,
-        adb_path: str,
+        adb_path: str | Callable[[], str],
         game_service,
         logger=None,
     ):

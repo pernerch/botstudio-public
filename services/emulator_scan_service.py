@@ -34,7 +34,7 @@ class EmulatorScanService:
     ):
         self.emulator_manager = emulator_manager or EmulatorManager()
         self.adb_runtime_service = adb_runtime_service or AdbRuntimeService(
-            self.emulator_manager.adb_path
+            lambda: self.emulator_manager.adb_path
         )
         self.game_service = game_service or GameService()
         self.profile_service = profile_service or ProfileService()
