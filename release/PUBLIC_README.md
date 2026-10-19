@@ -23,13 +23,22 @@ This repository starts with a clean snapshot of the current application
 source. It does not contain the private development history, credentials,
 profiles, game accounts, user packages, logs, backups or old test installers.
 
-Beta 1 uses version **0.1.0.10** and is published as a GitHub **prerelease**,
+Beta 1 uses version **0.1.0.11** and is published as a GitHub **prerelease**,
 not a stable release. Download the installer and its source/notice companions
 from [Releases](https://github.com/pernerch/botstudio-public/releases).
 Keep backups and use separate test data. Real two-machine/two-account game
 acceptance is an open beta task.
 
-Version 0.1.0.10 adds automatic MuMu ADB setup before Game package detection
+Version 0.1.0.11 adds a shared GitHub Game directory. Select a Game from the
+searchable list in Game Setup instead of entering a technical ID. New Games
+can be registered directly using the public GitHub contribution authorization,
+without manual approval. Existing Games and published packages keep their
+identities; local settings, Functions, profiles, Events and learning data remain
+in place. Downloads create a missing registered Game automatically. Renaming a
+Game or changing its Android package does not change its canonical identity.
+Online setup/sharing needs GitHub; already configured Runtime does not.
+
+Version 0.1.0.10 added automatic MuMu ADB setup before Game package detection
 and Runtime start: select the MuMu Player folder when needed, and BotStudio
 finds and checks the required tools, including subfolders. Existing services
 use saved paths without restarting Studio. No ADB executable is bundled.
@@ -44,7 +53,9 @@ Function/Event lists. Existing content is never overwritten: duplicate names
 receive numbered suffixes and conflicting internal IDs are remapped with their
 dependencies. Imported Events stay disabled. Select a target profile when
 multiple local profiles match; a single matching profile is selected automatically.
-The Game must exist locally. Incompatible variable definitions fail visibly
+The Game must be registered in the central directory; a missing local Game is
+created automatically. Events still need an existing local target profile.
+Incompatible variable definitions fail visibly
 without active partial imports. Preserved originals retain license, description
 and attribution for later editing and republication.
 

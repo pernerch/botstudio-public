@@ -307,6 +307,7 @@ class PackageService:
         }
         if package_metadata is not None:
             manifest["package_metadata"] = dict(package_metadata)
+        self._canonical_game_content(manifest, files, function.game_id)
         checksum_payload = self._checksums(files)
         manifest["checksums"] = checksum_payload
         self._validate_manifest(manifest)
@@ -471,9 +472,44 @@ class PackageService:
         manifest["source_id"] = event.event_id
         if package_metadata is not None:
             manifest["package_metadata"] = dict(package_metadata)
+        self._canonical_game_content(manifest, files, event.game_id)
         manifest["checksums"] = self._checksums(files)
         self._validate_manifest(manifest)
         return manifest, files, [event_path]
+
+    def _canonical_game_id(self, game_id):
+        game = self.game_service.get_game(game_id) or {}
+        return game.get("catalog_game_id") or game_id
+
+    def _canonical_game_content(self, manifest, files, local_game_id):
+        game = self.game_service.get_game(local_game_id) or {}
+        if game.get("catalog_game_name"):
+            manifest["game"]["name"] = game["catalog_game_name"]
+        canonical = self._canonical_game_id(local_game_id)
+        if canonical == local_game_id:
+            return
+        from services.game_registry_service import rebind_game_json
+
+        self._validate_path_component(canonical, "game")
+        rebound = {}
+        for name, source in files.items():
+            parts = name.split("/")
+            if len(parts) >= 4 and parts[1] in {"functions", "scheduler", "variables"}:
+                if parts[2] != local_game_id:
+                    raise PackageError("Package contains content from another Game.")
+                parts[2] = canonical
+            if name.endswith(".json") and len(parts) >= 4 and parts[1] in {
+                "functions", "scheduler", "variables",
+            }:
+                raw = source if isinstance(source, bytes) else source.read_bytes()
+                source = json.dumps(
+                    rebind_game_json(json.loads(raw), local_game_id, canonical),
+                    indent=2, ensure_ascii=False,
+                ).encode("utf-8")
+            rebound["/".join(parts)] = source
+        files.clear()
+        files.update(rebound)
+        manifest["game"]["id"] = canonical
 
     def publication_sources(self, functions: list[BotFunction]) -> list[tuple[dict, Path]]:
         """Resolve declared origins against preserved, checksum-verified original bytes."""
@@ -524,7 +560,7 @@ class PackageService:
         for path in (self.function_root.parent / "package-activations").glob("*.json"):
             receipt = read_json(path)
             if (
-                receipt.get("game_id") == manifest["game"]["id"]
+                receipt.get("source_game_id", receipt.get("game_id")) == manifest["game"]["id"]
                 and receipt.get("package_id") == details["package_id"]
                 and receipt.get("version") == details["package_version"]
                 and receipt.get("publisher_key") == self.publisher_identity_key(details["publisher"])
@@ -546,7 +582,7 @@ class PackageService:
         matching = [
             source for source in sources
             if self.matches_publication_source(source, source_id, package_type)
-            and source["game"]["id"] == game_id
+            and source["game"]["id"] == self._canonical_game_id(game_id)
         ]
         if len(matching) > 1:
             raise PackageError("multiple source package channels match; select an unambiguous source")

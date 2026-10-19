@@ -63,6 +63,22 @@ class GamePackageTests(unittest.TestCase):
         )
         return self.service.inspect_package(str(self.archive))
 
+    def test_legacy_local_game_exports_canonical_paths_without_changing_local_function(self):
+        self.service.game_service.get_game.return_value = {
+            "id": "game", "display_name": "Example Game",
+            "catalog_game_id": "canonical-game", "package_name": "com.example.game",
+        }
+        before = (self.functions / "game" / "example.json").read_bytes()
+        manifest = self.export(self.details)
+        self.assertEqual("canonical-game", manifest["game"]["id"])
+        with zipfile.ZipFile(self.archive) as archive:
+            name = "content/functions/canonical-game/example.json"
+            self.assertIn(name, manifest["checksums"])
+            payload = json.loads(archive.read(name))
+            self.assertEqual("canonical-game", payload["game_id"])
+            self.assertEqual("example", payload["function_id"])
+        self.assertEqual(before, (self.functions / "game" / "example.json").read_bytes())
+
     def test_author_license_round_trip_and_preview(self):
         manifest = self.export(self.details)
         self.assertEqual(self.details, manifest["package_metadata"])

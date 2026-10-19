@@ -27,6 +27,7 @@ from services.application_bootstrap import initialize_application
 from services.application_paths import ApplicationPaths
 from services.file_io import atomic_write_json, read_json
 from services.function_service import FunctionService
+from services.game_registry_service import GameRegistryService
 from services.library_service import LibraryService
 from services.managed_package_service import ManagedPackageService
 from services.package_activation_service import PackageActivationService
@@ -267,8 +268,32 @@ class PackageActivationTests(TestCase):
                     activation.import_copy(status["installation_id"])
                 self.assertEqual(before, self.active_snapshot())
 
+    def test_registered_game_import_uses_legacy_local_id_and_preserves_profiles(self):
+        installed = self.install()
+        atomic_write_json(self.root / "games/games.json", [{
+            "id": "legacy-local", "catalog_game_id": "game", "display_name": "Game",
+            "config": {"keep": "original"},
+        }])
+        profiles = [{"id": "local", "game": "legacy-local", "name": "Local"}]
+        atomic_write_json(self.root / "profiles/profiles.json", profiles)
+        original = self.managed.status(installed["installation_id"])
+        archive_before = Path(original["original_archive"]).read_bytes()
+        result = self.activation.import_copy(installed["installation_id"], "local")
+        self.assertEqual("legacy-local", result["game_id"])
+        function = read_json(self.root / "data/functions/legacy-local/function.json")
+        event = read_json(self.root / "data/scheduler/legacy-local/event.json")
+        self.assertEqual("legacy-local", function["game_id"])
+        self.assertEqual("legacy-local", event["game_id"])
+        self.assertEqual("local", event["profile_id"])
+        self.assertFalse(event["enabled"])
+        self.assertEqual(profiles, read_json(self.root / "profiles/profiles.json"))
+        self.assertEqual(archive_before, Path(original["original_archive"]).read_bytes())
+        receipt = read_json(self.root / "data/package-activations" / (result["installation_id"] + ".json"))
+        self.assertEqual("game", receipt["source_game_id"])
+
     def test_catalog_download_adds_repeated_copies_without_picker_or_activation_consent(self):
         from services.github_catalog_service import GitHubCatalogService
+        atomic_write_json(self.root / "games/games.json", [])
         downloads = ApplicationPaths.long_path(self.root / "data/package-downloads")
         downloads.mkdir(parents=True)
         self.addCleanup(shutil.rmtree, downloads)
@@ -296,6 +321,9 @@ class PackageActivationTests(TestCase):
         with (
             patch.object(service, "load", return_value=catalog),
             patch("ui.widgets.managed_packages_dialog.GitHubCatalogService", return_value=service),
+            patch.object(GameRegistryService, "require", return_value={
+                "id": "game", "name": "Game", "android_packages": ["com.example.game"],
+            }),
             patch("ui.widgets.managed_packages_dialog.QFileDialog.getSaveFileName") as picker,
         ):
             for _ in range(2):
@@ -306,6 +334,10 @@ class PackageActivationTests(TestCase):
                 self.assertIsNone(dialog.activation_progress)
             picker.assert_not_called()
         self.assertEqual(4, len(list((self.root / "data/functions/game").glob("*.json"))))
+        games = read_json(self.root / "games/games.json")
+        self.assertEqual(1, len(games))
+        self.assertEqual("game", games[0]["catalog_game_id"])
+        self.assertEqual("com.example.game", games[0]["package_name"])
         preserved = list(ApplicationPaths.long_path(self.root / "data/package-downloads").glob("*"))
         self.assertEqual(2, len(preserved))
         for directory in preserved:

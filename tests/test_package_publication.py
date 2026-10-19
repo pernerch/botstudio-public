@@ -164,6 +164,33 @@ class PackagePublicationTests(unittest.TestCase):
         self.assertEqual(original["package_metadata"]["license_text"], updated["package_metadata"]["license_text"])
         self.b.inspect_package(str(updated_archive))
 
+    def test_legacy_local_game_roundtrip_keeps_public_identity_terms_and_noop_fingerprint(self):
+        archive, original = self.archive(self.a, self.function, self.owner, "canonical-source")
+        root = self.b.function_root.parent.parent
+        local_game = {
+            "id": "legacy-local", "display_name": "My local Game",
+            "catalog_game_id": "game", "catalog_game_name": "game",
+        }
+        atomic_write_json(root / "games/games.json", [local_game])
+        atomic_write_json(root / "profiles/profiles.json", [])
+        self.b.game_service.get_game.return_value = local_game
+        managed = ManagedPackageService(root / "data/packages", self.b)
+        status = managed.install(archive)
+
+        @contextmanager
+        def guard():
+            yield
+
+        activation = PackageActivationService(root=root, managed=managed, execution_guard=guard, logger=Mock())
+        activation.import_copy(status["installation_id"])
+        imported = self.b.load_saved_function("legacy-local", "function")
+        preview = self.b.preview_function_package(imported, publication_account=self.owner)
+        self.assertEqual("game", preview["manifest"]["game"]["id"])
+        self.assertEqual(original["package_metadata"]["package_id"], preview["manifest"]["package_metadata"]["package_id"])
+        self.assertEqual(original["package_metadata"]["license_text"], preview["manifest"]["package_metadata"]["license_text"])
+        self.assertEqual(self.a.archive_content_fingerprint(archive), preview["content_fingerprint"])
+        self.assertEqual([local_game], read_json(root / "games/games.json"))
+
     def test_same_account_roundtrip_version_bump_is_not_new_publication_content(self):
         archive, _ = self.archive(self.a, self.function, self.owner, "unchanged-a")
         published = self.a.archive_content_fingerprint(archive)

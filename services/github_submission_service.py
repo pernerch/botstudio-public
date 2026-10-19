@@ -121,6 +121,21 @@ class GitHubSubmissionService:
         base = self._sha(self._object(ref, "object").get("sha"))
         commit = self._api("GET", f"/repositories/{repository_id}/git/commits/{base}", token)
         tree = self._sha(self._object(commit, "tree").get("sha"))
+        from services.game_registry_service import GameRegistryService
+
+        directory = self._api(
+            "GET", f"/repositories/{repository_id}/contents/game-registry.json?ref={base}", token,
+        )
+        try:
+            if directory.get("encoding") != "base64":
+                raise ValueError("Invalid Game directory encoding")
+            games = GameRegistryService.validate(json.loads(base64.b64decode(directory["content"])))
+        except (KeyError, ValueError) as error:
+            raise PackageError("Catalog Game directory could not be verified") from error
+        if GameRegistryService.find(games, identity=submission["game_id"]) is None:
+            raise PackageError(
+                "Game is not registered. Open Game Setup and select or register the Game, then pack again.",
+            )
         for key in ("archive_path", "metadata_path"):
             existing = self._api(
                 "GET", f"/repositories/{repository_id}/contents/{submission[key]}?ref={base}",

@@ -1,5 +1,8 @@
 from pathlib import Path
+from functools import wraps
 import json
+from threading import RLock
+from typing import Callable, ParamSpec, TypeVar
 
 from core.emulator_manager import (
     EmulatorManager,
@@ -9,6 +12,20 @@ from core.adb_service import (
     AdbService,
 )
 from services.reinitialize_service import get_default_reinitialize_service
+from services.file_io import atomic_write_json
+
+
+GAME_STORE_LOCK = RLock()
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def game_store_locked(operation: Callable[_P, _R]) -> Callable[_P, _R]:
+    @wraps(operation)
+    def locked(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        with GAME_STORE_LOCK:
+            return operation(*args, **kwargs)
+    return locked
 
 
 class GameService:
@@ -62,22 +79,13 @@ class GameService:
                 fp
             )
 
+    @game_store_locked
     def save(
         self,
         games,
     ):
 
-        with open(
-            self.file_name,
-            "w",
-            encoding="utf-8",
-        ) as fp:
-
-            json.dump(
-                games,
-                fp,
-                indent=4,
-            )
+        atomic_write_json(self.file_name, games)
         if self.reinitialize_service:
             self.reinitialize_service.publish(
                 "game",
@@ -118,6 +126,7 @@ class GameService:
 
         return games[0]
 
+    @game_store_locked
     def create_game(
         self,
         game_id: str,
@@ -152,6 +161,7 @@ class GameService:
 
         return game
 
+    @game_store_locked
     def set_default_game(
         self,
         game_id: str,
@@ -256,6 +266,7 @@ class GameService:
 
         return seed
 
+    @game_store_locked
     def save_settings(
         self,
         game_id: str,
@@ -285,6 +296,7 @@ class GameService:
 
         return merged
 
+    @game_store_locked
     def save_game_config(
         self,
         game_id: str,
@@ -372,6 +384,7 @@ class GameService:
 
         return None
 
+    @game_store_locked
     def update_package(
         self,
         game_id: str,

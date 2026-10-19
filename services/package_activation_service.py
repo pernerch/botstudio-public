@@ -103,6 +103,16 @@ class PackageActivationService:
             for profile in profiles if profile.get("game") == game_id
         ]
 
+    def local_game_id(self, source_game_id):
+        games = read_json(self.root / "games" / "games.json")
+        matches = [
+            game["id"] for game in games
+            if (game.get("catalog_game_id") or game["id"]) == source_game_id
+        ]
+        if len(matches) > 1:
+            raise PackageError("Multiple local Games share the package's canonical Game.")
+        return matches[0] if matches else source_game_id
+
     def context(self, installation_id):
         status = self.managed.status(installation_id)
         return {
@@ -259,7 +269,8 @@ class PackageActivationService:
         if copying:
             status = dict(status, installation_id=hashlib.sha256(uuid4().bytes).hexdigest())
             installation_id = status["installation_id"]
-        game_id = self._identifier(status["game_id"])
+        source_game_id = self._identifier(status["game_id"])
+        game_id = self.local_game_id(source_game_id) if copying else source_game_id
         receipt_path = f"data/package-activations/{installation_id}.json"
         previous_receipt, receipt_bytes = self._read_receipt(status)
         active_before = {}
@@ -293,6 +304,17 @@ class PackageActivationService:
             or {name: digest for name, digest in source_snapshot.items() if name.startswith("content/")} != copied_snapshot
         ):
             raise PackageError("package working copy changed while preparing import")
+        if game_id != source_game_id:
+            from services.game_registry_service import rebind_game_json
+
+            for area in ("functions", "scheduler", "variables"):
+                directory = content / area / source_game_id
+                if directory.exists():
+                    directory.rename(content / area / game_id)
+                for path in (content / area).rglob("*.json"):
+                    atomic_write_json(
+                        path, rebind_game_json(read_json(path), source_game_id, game_id),
+                    )
         copied_identities = self._copy_content(content, game_id) if copying else None
         if any(path.name not in {"functions", "library", "scheduler", "variables", "package-assets"} for path in content.iterdir()):
             raise PackageError("unsupported active package content")
@@ -512,6 +534,7 @@ class PackageActivationService:
                 raise PackageError("local active content changed while preparing update: " + ", ".join(conflicts))
         summary = {
             "installation_id": installation_id, "game_id": game_id,
+            "source_game_id": source_game_id,
             "profile_id": profile_id, "functions": len(functions),
             "library_entries": len(library_ids), "events": len(events),
             "files": len(writes) + 1, "modified": status["modified"],

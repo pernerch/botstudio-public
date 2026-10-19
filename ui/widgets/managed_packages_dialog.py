@@ -15,6 +15,7 @@ from services.logging_service import get_logger
 from services.catalog_submission_service import CatalogSubmissionService
 from services.github_submission_service import GitHubSubmissionService
 from services.github_catalog_service import GitHubCatalogService
+from services.game_registry_service import GameRegistryService
 from services.managed_package_service import ManagedPackageService
 from services.package_service import PackageError, PackageService
 from services.package_description_service import PackageDescriptionService
@@ -396,10 +397,20 @@ class ManagedPackagesDialog(QDialog):
         def load():
             result = GitHubCatalogService().load()
             if self.activation_service is not None:
+                games = GameRegistryService.adopt_existing(
+                    self.activation_service.root / "games" / "games.json",
+                    GameRegistryService().load(),
+                )
                 profiles = read_json(self.activation_service.root / "profiles" / "profiles.json")
                 if not isinstance(profiles, list):
                     raise PackageError("invalid local profile store")
-                result["local_profiles"] = profiles
+                identities = {
+                    game["id"]: game.get("catalog_game_id") or game["id"] for game in games
+                }
+                result["local_profiles"] = [
+                    dict(profile, game=identities.get(profile.get("game"), profile.get("game")))
+                    for profile in profiles
+                ]
             return result
         self._run(load, self._catalog_loaded)
 
@@ -574,6 +585,10 @@ class ManagedPackagesDialog(QDialog):
                 directory = Path(temporary)
                 path = directory / "package.botstudio.zip"
                 preview = GitHubCatalogService().download_preview(catalog, entry, path, self.service)
+                registered = GameRegistryService().require(preview["manifest"]["game"]["id"])
+                GameRegistryService.ensure_local(
+                    self.activation_service.root / "games" / "games.json", registered,
+                )
                 managed = ManagedPackageService(
                     root=ApplicationPaths.long_path(
                         self.service.root.parent / "package-downloads" / uuid4().hex,
@@ -594,7 +609,7 @@ class ManagedPackagesDialog(QDialog):
 
     def _downloaded(self, result):
         bus = get_default_reinitialize_service()
-        for source in ("library", "variable", "function", "scheduler"):
+        for source in ("game", "library", "variable", "function", "scheduler"):
             bus.publish(source, game_id=result["game_id"])
         self.status.setText(t("packages.download_complete"))
         self.details.setPlainText(t("packages.download_complete"))

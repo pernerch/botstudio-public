@@ -1717,10 +1717,26 @@ STRINGS = {
             "The MuMu connection failed. Check that the selected instance is running with ADB enabled, then try again.",
 
         "game_setup.missing_fields":
-            "Game ID, display name and package name are required.",
+            "Game name and Android package name are required.",
 
         "game_setup.saved":
             "Game saved.",
+        "game_setup.directory":
+            "Game from GitHub",
+        "game_setup.load_directory":
+            "Refresh GitHub Game list",
+        "game_setup.register_new":
+            "Register a new Game...",
+        "game_setup.directory_busy":
+            "Loading or registering the Game on GitHub. Please wait...",
+        "game_setup.directory_ready":
+            "Select a Game from the list or register a new one. Existing local content is preserved.",
+        "game_setup.directory_failed":
+            "Game directory: {error}",
+        "game_setup.choose_game":
+            "Select a Game from the list, or choose 'Register a new Game...'.",
+        "game_setup.bind_local":
+            "Local Game '{name}' selected. Choose its registered Game above and save to link it without moving its content.",
 
         # --------------------------
         # Logs

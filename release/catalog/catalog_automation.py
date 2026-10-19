@@ -1,6 +1,7 @@
 """Install in the catalog's automation directory; uses only Python's stdlib."""
 
 import argparse
+import base64
 import hashlib
 from io import BytesIO
 import json
@@ -10,6 +11,9 @@ import re
 from time import monotonic
 import urllib.error
 import urllib.request
+from urllib.parse import quote
+import unicodedata
+import uuid
 from zipfile import ZipFile
 
 
@@ -17,6 +21,11 @@ REPOSITORY = "pernerch/botstudio-catalog"
 MAX_ARCHIVE = 100 * 1024 * 1024
 MAX_EXPANDED = 512 * 1024 * 1024
 MAX_JSON = 2 * 1024 * 1024
+MAX_REGISTRY = 512 * 1024
+MAX_REGISTRY_GAMES = 10000
+REGISTRY_ATTEMPTS = 3
+GAME_ISSUE_PREFIX = "[BotStudio Game] "
+REGISTRY_BRANCH_PREFIX = "botstudio-game-registration/"
 
 
 def require(condition, message):
@@ -32,6 +41,240 @@ def load_json(raw):
             result[key] = value
         return result
     return json.loads(raw, object_pairs_hook=pairs)
+
+
+def game_name(value):
+    require(
+        isinstance(value, str) and 0 < len(value) <= 120
+        and all(not unicodedata.category(char).startswith("C") for char in value),
+        "Game name must be 1-120 plain characters without controls",
+    )
+    name = " ".join(unicodedata.normalize("NFKC", value).split())
+    require(0 < len(name) <= 120, "invalid normalized Game name")
+    return name
+
+
+def normalized_game_name(value):
+    return " ".join(game_name(value).casefold().split())
+
+
+def android_package(value):
+    require(
+        isinstance(value, str) and len(value) <= 255
+        and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+", value),
+        "invalid Android package name",
+    )
+    return value
+
+
+def validate_registry(value):
+    require(
+        isinstance(value, dict) and set(value) == {"schema_version", "games"}
+        and type(value["schema_version"]) is int and value["schema_version"] == 1
+        and isinstance(value["games"], list) and len(value["games"]) <= MAX_REGISTRY_GAMES,
+        "invalid Game registry",
+    )
+    ids, names, packages = set(), set(), set()
+    for game in value["games"]:
+        require(isinstance(game, dict) and set(game) == {"id", "name", "android_packages"}, "invalid Game registry entry")
+        game_id = game["id"]
+        require(isinstance(game_id, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", game_id), "invalid registered Game ID")
+        name = normalized_game_name(game["name"])
+        require(game_id.casefold() not in ids and name not in names, "ambiguous Game registry identity")
+        ids.add(game_id.casefold())
+        names.add(name)
+        aliases = game["android_packages"]
+        require(isinstance(aliases, list) and len(aliases) <= 100, "invalid registered Android packages")
+        for package in aliases:
+            android_package(package)
+            require(package not in packages, "ambiguous registered Android package")
+            packages.add(package)
+    return value
+
+
+def read_registry(api, repository_id):
+    # No PR/head ref: authorization always uses the current default branch.
+    file = api.request("GET", f"/repositories/{repository_id}/contents/game-registry.json")
+    require(
+        isinstance(file, dict) and file.get("type") == "file"
+        and file.get("encoding") == "base64" and isinstance(file.get("content"), str)
+        and type(file.get("size")) is int and 0 < file["size"] <= MAX_REGISTRY
+        and isinstance(file.get("sha"), str) and re.fullmatch(r"[0-9a-f]{40}", file["sha"]),
+        "invalid Game registry file",
+    )
+    try:
+        raw = base64.b64decode(file["content"].replace("\n", "").replace("\r", ""), validate=True)
+    except ValueError:
+        raise ValueError("invalid Game registry encoding") from None
+    require(len(raw) == file["size"] and len(raw) <= MAX_REGISTRY, "Game registry size mismatch")
+    return validate_registry(load_json(raw)), file["sha"]
+
+
+def registration_request(issue):
+    require(
+        isinstance(issue, dict) and "pull_request" not in issue
+        and issue.get("state") == "open" and isinstance(issue.get("user"), dict)
+        and issue["user"].get("type") == "User"
+        and type(issue["user"].get("id")) is int and issue["user"]["id"] > 0,
+        "Game registration requires an open issue by an authenticated user",
+    )
+    body = issue.get("body")
+    require(isinstance(body, str) and len(body.encode("utf-8")) <= 4096, "Game registration body is too large or missing")
+    try:
+        request = load_json(body)
+    except (ValueError, TypeError, RecursionError):
+        raise ValueError("Game registration body must be duplicate-free JSON") from None
+    require(
+        isinstance(request, dict) and set(request) == {"schema_version", "name", "android_package_name"}
+        and type(request["schema_version"]) is int and request["schema_version"] == 1,
+        "invalid Game registration fields",
+    )
+    name = game_name(request["name"])
+    package = android_package(request["android_package_name"])
+    title = issue.get("title")
+    require(
+        isinstance(title, str) and title.startswith(GAME_ISSUE_PREFIX)
+        and len(title) <= len(GAME_ISSUE_PREFIX) + 120
+        and normalized_game_name(title[len(GAME_ISSUE_PREFIX):]) == normalized_game_name(name),
+        "Game registration title does not match its name",
+    )
+    return name, package
+
+
+def registered_game(registry, name, package):
+    by_name = next((game for game in registry["games"] if normalized_game_name(game["name"]) == normalized_game_name(name)), None)
+    by_package = next((game for game in registry["games"] if package in game["android_packages"]), None)
+    require(by_name is None or by_package is None or by_name["id"] == by_package["id"], "Game name and Android package identify different registered Games")
+    require(by_name is None or by_package is not None,
+            "Game name already registered with another Android package. Select the existing Game explicitly for a changed local package, or use a distinct edition name.")
+    return by_name or by_package
+
+
+def trusted_registry_pr(api, number, repository_id, *, expected_head=None):
+    root = f"/repositories/{repository_id}"
+    pr = api.request("GET", f"{root}/pulls/{number}")
+    actor = pr.get("user", {})
+    head = pr.get("head", {})
+    base = pr.get("base", {})
+    if not (
+        actor.get("type") == "Bot" and actor.get("login") == "github-actions[bot]"
+        and actor.get("id") == 41898282
+        and head.get("repo", {}).get("id") == repository_id
+        and base.get("repo", {}).get("id") == repository_id
+        and isinstance(head.get("ref"), str) and re.fullmatch(
+            re.escape(REGISTRY_BRANCH_PREFIX) + r"[1-9][0-9]*-[0-9a-f]{32}", head["ref"],
+        )
+        and pr.get("changed_files") == 1
+    ):
+        return False
+    files = api.request("GET", f"{root}/pulls/{number}/files?per_page=2")
+    return (
+        isinstance(files, list) and len(files) == 1
+        and files[0].get("filename") == "game-registry.json"
+        and files[0].get("status") == "modified"
+        and (expected_head is None or (
+            head.get("sha") == expected_head and pr.get("state") == "open"
+        ))
+    )
+
+
+def write_registry_pr(api, number, repository_id, repo, sha, raw, diagnostics):
+    """Respect PR-only protection; never write or force-update the default branch."""
+    root = f"/repositories/{repository_id}"
+    branch = f"{REGISTRY_BRANCH_PREFIX}{number}-{uuid.uuid4().hex}"
+    default_ref = quote(repo["default_branch"], safe="")
+    base = api.request("GET", f"{root}/git/ref/heads/{default_ref}")
+    base_sha = base["object"]["sha"]
+    require(base["object"]["type"] == "commit" and re.fullmatch(r"[0-9a-f]{40}", base_sha), "invalid default branch head")
+    api.request("POST", f"{root}/git/refs", {"ref": f"refs/heads/{branch}", "sha": base_sha})
+    result = api.request("PUT", f"{root}/contents/game-registry.json", {
+        "message": f"Register Game from issue #{number}", "sha": sha,
+        "branch": branch, "content": base64.b64encode(raw).decode("ascii"),
+    })
+    head = result["commit"]["sha"]
+    require(isinstance(head, str) and re.fullmatch(r"[0-9a-f]{40}", head), "invalid registry commit")
+    pr = api.request("POST", f"{root}/pulls", {
+        "title": f"Register Game from issue #{number}", "head": branch,
+        "base": repo["default_branch"],
+        "body": f"Trusted registry update for issue #{number}. Automatically validated; no package publication.",
+    })
+    pr_number = pr["number"]
+    require(type(pr_number) is int and pr_number > 0, "invalid registry PR number")
+    diagnostics.append(pr_number)
+    pr_path = f"{root}/pulls/{pr_number}"
+    try:
+        require(trusted_registry_pr(api, pr_number, repository_id, expected_head=head), "registry PR identity/files changed")
+        _, current_sha = read_registry(api, repository_id)
+        if current_sha != sha:
+            raise GitHubError(409)
+        result = api.request("PUT", f"{pr_path}/merge", {
+            "sha": head, "merge_method": "merge",
+            "commit_title": f"Accept Game registration #{number}",
+        })
+        if result.get("merged") is not True:
+            raise GitHubError(409)
+    except (ValueError, KeyError, TypeError):
+        # Prevent a stale full-registry proposal from being merged later by accident.
+        api.request("POST", f"{root}/issues/{pr_number}/comments", {"body":
+            "Automatic registry merge failed or was superseded. This proposal is closed; "
+            "the issue workflow re-reads the default-branch registry before retrying. "
+            "Inspect the workflow diagnostics; do not manually merge this stale proposal."
+        })
+        api.request("PATCH", pr_path, {"state": "closed"})
+        raise
+
+
+def register_game(api, number, repository_id):
+    require(type(number) is int and number > 0 and type(repository_id) is int and repository_id > 0, "invalid repository/issue ID")
+    root = f"/repositories/{repository_id}"
+    issue_path = f"{root}/issues/{number}"
+    # The event supplies only the number; all other issue data is freshly read.
+    issue = api.request("GET", issue_path)
+    if not isinstance(issue, dict) or not isinstance(issue.get("title"), str) or not issue["title"].startswith(GAME_ISSUE_PREFIX):
+        return None
+    diagnostics = []
+    try:
+        name, package = registration_request(issue)
+        for attempt in range(REGISTRY_ATTEMPTS):
+            repo = api.request("GET", root)
+            require(
+                isinstance(repo, dict) and repo.get("id") == repository_id and repo.get("full_name") == REPOSITORY
+                and repo.get("private") is False and isinstance(repo.get("default_branch"), str)
+                and repo["default_branch"],
+                "catalog identity mismatch",
+            )
+            registry, sha = read_registry(api, repository_id)
+            game = registered_game(registry, name, package)
+            changed = False
+            if game is None:
+                game = {"id": str(uuid.uuid4()), "name": name, "android_packages": [package]}
+                registry["games"].append(game)
+                changed = True
+            if changed:
+                validate_registry(registry)
+                raw = (json.dumps(registry, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+                require(len(raw) <= MAX_REGISTRY, "Game registry capacity exceeded")
+                try:
+                    write_registry_pr(api, number, repository_id, repo, sha, raw, diagnostics)
+                except GitHubError as error:
+                    if error.status in (405, 409, 422) and attempt + 1 < REGISTRY_ATTEMPTS:
+                        continue
+                    raise
+                # Confirm the live committed identity, including after a competing write.
+                confirmed, _ = read_registry(api, repository_id)
+                game = registered_game(confirmed, name, package)
+                require(game is not None and package in game["android_packages"], "Game registration was not confirmed")
+            result = {"schema_version": 1, "game_id": game["id"], "name": game["name"]}
+            api.request("POST", f"{issue_path}/comments", {"body": json.dumps(result, ensure_ascii=True)})
+            api.request("PATCH", issue_path, {"state": "closed", "state_reason": "completed"})
+            return result
+    except (ValueError, KeyError, TypeError, RecursionError):
+        # Never reflect untrusted issue text or raw transport errors into Markdown.
+        api.request("POST", f"{issue_path}/comments", {"body": json.dumps({
+            "schema_version": 1, "error": "Game registration failed. Check the request fields and workflow diagnostics. If the name already exists with another package, select the existing Game explicitly for a changed local package or use a distinct edition name. Reopen to retry.",
+            "registry_pull_requests": diagnostics,
+        })})
+        raise
 
 
 def account(value):
@@ -126,6 +369,12 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+class GitHubError(ValueError):
+    def __init__(self, status):
+        self.status = status
+        super().__init__(f"GitHub catalog automation HTTP {status}; inspect partial state before retry")
+
+
 class GitHub:
     def __init__(self, token):
         self.token = token
@@ -158,7 +407,7 @@ class GitHub:
             error.close()
             if missing and code == 404:
                 return None
-            raise ValueError(f"GitHub catalog automation HTTP {code}; inspect partial state before retry") from None
+            raise GitHubError(code) from None
         except urllib.error.URLError:
             raise ValueError("GitHub request failed; inspect partial state before retry") from None
         return bytes(result) if raw else load_json(result)
@@ -196,6 +445,8 @@ def validate_pr(api, number, repository_id, *, allow_merged=False):
     require(len(descriptor_bytes) <= MAX_JSON, "descriptor too large")
     raw = api.request("GET", f"{root}/git/blobs/{entries[archive_path]['sha']}", raw=True)
     descriptor = validate_package(raw, load_json(descriptor_bytes), actor)
+    registry, _ = read_registry(api, repository_id)
+    require(any(game["id"] == descriptor["game_id"] for game in registry["games"]), "unregistered Game ID")
     if pr["state"] == "open":
         # Contents ref omitted deliberately: check the current default branch.
         for name in names:
@@ -308,16 +559,28 @@ def publish(api, number, repository_id):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("validate", "publish"))
-    parser.add_argument("--pr", required=True, type=int)
+    parser.add_argument("mode", choices=("validate", "publish", "register-game"))
+    parser.add_argument("--pr", type=int)
+    parser.add_argument("--issue", type=int)
     args = parser.parse_args()
-    require(args.pr > 0 and os.environ["GITHUB_REPOSITORY"] == REPOSITORY, "unexpected repository/PR")
+    require(os.environ["GITHUB_REPOSITORY"] == REPOSITORY, "unexpected repository")
     repository_id = int(os.environ["GITHUB_REPOSITORY_ID"])
     require(repository_id > 0, "invalid repository ID")
     api = GitHub(os.environ["GH_TOKEN"])
-    if args.mode == "validate":
+    if args.mode == "register-game":
+        require(args.issue is not None and args.issue > 0 and args.pr is None, "invalid issue argument")
+        register_game(api, args.issue, repository_id)
+    elif args.mode == "validate":
+        require(args.pr is not None and args.pr > 0 and args.issue is None, "invalid PR argument")
+        if trusted_registry_pr(api, args.pr, repository_id):
+            print("Trusted registry-only PR; package validation skipped.")
+            return
         validate_pr(api, args.pr, repository_id, allow_merged=True)
     else:
+        require(args.pr is not None and args.pr > 0 and args.issue is None, "invalid PR argument")
+        if trusted_registry_pr(api, args.pr, repository_id):
+            print("Trusted registry-only PR; package publication skipped.")
+            return
         publish(api, args.pr, repository_id)
     print("Catalog operation completed successfully.")
 

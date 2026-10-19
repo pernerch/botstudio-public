@@ -77,6 +77,7 @@ class GitHubSubmissionTests(unittest.TestCase):
         self.existing_version = False
         self.fail_path = None
         self.blob_too_large = False
+        self.registered_game = True
         self.transport = Mock(side_effect=self.respond)
         self.service = GitHubSubmissionService(self.preflight, self.publication, self.transport)
 
@@ -108,6 +109,14 @@ class GitHubSubmissionTests(unittest.TestCase):
             return self.response({"object": {"sha": self.base}})
         if path == f"/repositories/10/git/commits/{self.base}":
             return self.response({"tree": {"sha": "b" * 40}})
+        if "/contents/game-registry.json?" in path:
+            return self.response({
+                "encoding": "base64", "content": base64.b64encode(json.dumps({
+                    "schema_version": 1, "games": [
+                        {"id": "game", "name": "Game", "android_packages": []},
+                    ] if self.registered_game else [],
+                }).encode()).decode(),
+            })
         if "/contents/" in path:
             return self.response({"sha": "e" * 40} if self.existing_version else {}, 200 if self.existing_version else 404)
         if path == "/repos/contributor/botstudio-catalog-contributions":
@@ -141,6 +150,12 @@ class GitHubSubmissionTests(unittest.TestCase):
 
     def prepare(self):
         return self.service.prepare(self.archive, expected_sha256=self.managed._digest(self.archive))
+
+    def test_unregistered_game_is_rejected_before_any_public_write(self):
+        self.registered_game = False
+        with self.assertRaisesRegex(PackageError, "Game is not registered"):
+            self.prepare()
+        self.assertTrue(all(method == "GET" for method, _path, _data in self.calls))
 
     def test_prepare_is_read_only_and_checks_both_live_accounts(self):
         plan = self.prepare()

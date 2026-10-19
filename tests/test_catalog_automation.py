@@ -1,4 +1,5 @@
 from copy import deepcopy
+import base64
 import faulthandler
 import hashlib
 from io import BytesIO
@@ -95,6 +96,14 @@ class CatalogAutomationTests(unittest.TestCase):
             ]}
         if "/git/blobs/" in path:
             return self.raw if path.endswith("archive_path") else json.dumps(self.descriptor).encode()
+        if path == root + "/contents/game-registry.json":
+            raw = json.dumps({"schema_version": 1, "games": [
+                {"id": "game", "name": "Fixture Game", "android_packages": []},
+            ]}).encode()
+            return {
+                "type": "file", "sha": "e" * 40, "encoding": "base64",
+                "size": len(raw), "content": base64.b64encode(raw).decode("ascii"),
+            }
         if "/contents/" in path:
             if "?ref=" in path:
                 return {"type": "file", "sha": "archive_path" if "package.botstudio.zip" in path else "metadata_path"}
