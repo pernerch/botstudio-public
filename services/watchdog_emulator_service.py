@@ -19,6 +19,7 @@ class WatchdogEmulatorService:
         if command == "emulators.list":
             if arguments:
                 raise ValueError("This command does not accept arguments")
+            pauses = self.runtime.get_status().get("paused_emulators", {})
             return {
                 "emulators": [
                     {
@@ -26,6 +27,9 @@ class WatchdogEmulatorService:
                         "running": self.runtime.emulator_manager.is_instance_running(
                             instance
                         ),
+                        "automation": pauses.get(str(instance), {}).get("state", "enabled")
+                        if self.runtime.running else "stopped",
+                        "pause_error": pauses.get(str(instance), {}).get("error"),
                     }
                     for instance in instances[:20]
                 ],
@@ -50,6 +54,11 @@ class WatchdogEmulatorService:
 
     def _restart(self, instance, profiles):
         runtime = self.runtime
+        if runtime.running and runtime.get_status().get("paused_emulators"):
+            raise RuntimeError(
+                "Emulator restart stops the whole Runtime. Resume paused emulators "
+                "or stop Runtime explicitly before maintenance."
+            )
         if not runtime._start_lock.acquire(blocking=False):
             raise RuntimeError("Runtime start or emulator maintenance is busy")
         acquired = []

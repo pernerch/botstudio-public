@@ -4,6 +4,7 @@ import time
 import unittest
 from copy import deepcopy
 from datetime import datetime, timezone
+from unittest.mock import Mock
 
 from scheduler.models import Event, Task
 from services.runtime_service import RuntimeService
@@ -89,6 +90,7 @@ class WatchdogSchedulerControlTests(unittest.TestCase):
         self.runtime.scheduler_service = FakeSchedulerService([self.event])
         self.runtime._profile_execution_locks = {}
         self.runtime.running = True
+        self.runtime.request_schedule = Mock(return_value=True)
 
     def test_snapshot_lists_custom_events_and_open_tasks(self):
         snapshot = self.runtime.watchdog_scheduler_command("events.list")

@@ -73,6 +73,8 @@ def _handle_telegram_command(command_name, arguments, service):
             "/runtime — Open bot controls\n"
             "/runtime_start — Start the bot and check all active profiles\n"
             "/runtime_stop — Stop bot automation, keep Studio open\n\n"
+            "/runtime_pause [instance|all] — Pause automation, leave emulators open\n"
+            "/runtime_resume [instance|all] — Resume through fresh profile checks and Init\n\n"
             "📅 Events & tasks — Studio must be running\n"
             "/events [page] — Select an event and enable, disable or run it now\n"
             "/tasks [page] — Show queued and running tasks\n"
@@ -176,6 +178,7 @@ def _handle_telegram_command(command_name, arguments, service):
             f"BotStudio: {'running' if status['studio_pid'] else 'stopped'}"
             f"{' | IPC unavailable' if studio is None else ''}\n"
             f"Runtime: {runtime_state}\n"
+            f"Paused/resuming emulators: {', '.join(runtime.get('paused_emulators', {})) or 'none'}\n"
             f"Recovery: {status.get('runtime_recovery', 'unknown')}\n"
             f"Restarts last 24h: {status['restarts_last_window']}"
         )
@@ -196,6 +199,27 @@ def _handle_telegram_command(command_name, arguments, service):
         )
         result = service.runtime_command(ipc_command)
         return f"Runtime: {result.get('state', 'accepted')}"
+    if command_name in {"runtime_pause", "runtime_resume"}:
+        if len(arguments) > 1:
+            return f"Usage: /{command_name} [instance|all]"
+        target = arguments[0] if arguments else "all"
+        if target != "all" and (not target.isascii() or not target.isdigit()):
+            return f"Usage: /{command_name} [instance|all]"
+        result = service.runtime_command(
+            "runtime.pause" if command_name == "runtime_pause" else "runtime.resume",
+            {} if target == "all" else {"instance": target},
+        )
+        if not isinstance(result, dict):
+            return "Studio returned an invalid control response."
+        if result.get("state") in {"busy", "failed"} or result.get("accepted") is False:
+            return result.get("error") or "Studio is busy. Try again shortly."
+        return (
+            f"Emulator {target}: pause requested. Old automation is cancelled; "
+            "wait for 'paused' in /emulators before manual use."
+            if command_name == "runtime_pause" else
+            f"Emulator {target}: resume requested. After old work ends, profile checks "
+            "and Init run again; old Function execution is not continued."
+        )
     if command_name in {"events", "tasks"}:
         if arguments:
             return f"Usage: /{command_name}"

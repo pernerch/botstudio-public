@@ -303,12 +303,8 @@ class ManagedPackagesDialog(QDialog):
             return
 
         def upload():
-            preview = self.service.preview(Path(entry["path"]))
             service = GitHubSubmissionService(preflight=CatalogSubmissionService(managed=self.service))
-            plan = service.prepare(Path(entry["path"]), expected_sha256=preview["archive_sha256"])
-            publication = service.submit(Path(entry["path"]), plan=plan)
-            self.outbox_service.uploaded(entry["path"], preview["archive_sha256"], publication)
-            return publication
+            return self.outbox_service.upload(entry["path"], self.service, service)
 
         def uploaded(result):
             self._submission_sent(result)

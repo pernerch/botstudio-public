@@ -122,6 +122,19 @@ class WatchdogControlService(QObject):
         if command == "runtime.stop":
             self._require_empty_arguments(arguments)
             return self._stop_runtime()
+        if command in {"runtime.pause", "runtime.resume"}:
+            if set(arguments) - {"instance"}:
+                raise ValueError("Only instance is accepted")
+            instance = arguments.get("instance")
+            if arguments and instance is None:
+                raise ValueError("instance must be a non-negative integer")
+            handler = self.runtime_service.pause if command == "runtime.pause" else self.runtime_service.resume
+            handler(instance)
+            return {
+                "accepted": True,
+                "state": "pause_requested" if command == "runtime.pause" else "resuming",
+                "instance": instance if instance is not None else "all",
+            }
         if command in self.SCHEDULER_COMMANDS:
             return self._start_scheduler_command(command, arguments)
         if command == "control.operation.get":

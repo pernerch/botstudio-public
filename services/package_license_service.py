@@ -136,11 +136,8 @@ class PackageLicenseService:
         if option is None:
             return None
 
-        identity = hashlib.sha256(
-            f"{package_type}\0{game_id}\0{source_id}".encode("utf-8")
-        ).hexdigest()[:32]
         return {
-            "package_id": f"{package_type}-{identity}",
+            "package_id": self.package_identity(package_type, game_id, source_id),
             "package_version": f"1.0.{revision}",
             "author": f"@{account.login}",
             "license_id": option.spdx_id,
@@ -149,6 +146,13 @@ class PackageLicenseService:
             "rights_confirmed": False,
             "publisher": account.to_dict(),
         }
+
+    @staticmethod
+    def package_identity(package_type: str, game_id: str, source_id: str) -> str:
+        identity = hashlib.sha256(
+            f"{package_type}\0{game_id}\0{source_id}".encode("utf-8")
+        ).hexdigest()[:32]
+        return f"{package_type}-{identity}"
 
     @classmethod
     def _fetch_license_text(cls, spdx_id: str) -> str:

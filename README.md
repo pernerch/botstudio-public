@@ -23,11 +23,23 @@ This repository starts with a clean snapshot of the current application
 source. It does not contain the private development history, credentials,
 profiles, game accounts, user packages, logs, backups or old test installers.
 
-Beta 1 uses version **0.1.0.12** and is published as a GitHub **prerelease**,
+Beta 1 uses version **0.1.0.13** and is published as a GitHub **prerelease**,
 not a stable release. Download the installer and its source/notice companions
 from [Releases](https://github.com/pernerch/botstudio-public/releases).
 Keep backups and use separate test data. Real two-machine/two-account game
 acceptance is an open beta task.
+
+Version 0.1.0.13 improves independent emulator execution, fair account scheduling,
+immediate Run Selected requests and profile-bound Init handling. Restoring an
+existing game process to the foreground no longer forces a restart; a new or
+unverifiable process still requires fresh Init. Scheduling defaults can be
+inherited or overridden per Game. Debug observation follows the selected profile,
+and the Timeline shows only active, concretely scheduled work.
+
+This version also bounds native OCR/vision thread pools, improves emulator
+pause/recovery and Telegram controls, refines package preparation and provenance
+handling, and gives Python-launched Studio windows an explicit Windows Shell
+taskbar icon. Local user packages and game data are not included in the installer.
 
 Version 0.1.0.12 fixes package imports into an otherwise empty Studio:
 automatically created variables such as Interrupt keep their local identity and

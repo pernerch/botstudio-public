@@ -248,7 +248,7 @@ class TelegramMenuTransportTests(unittest.TestCase):
                 self.service._command_times.clear()
                 arguments = (
                     ["event-1", "profile-1"] if command.startswith("event_")
-                    else ["0"] if command == "emulator_restart" else []
+                    else ["0"] if command in {"emulator_restart", "runtime_pause", "runtime_resume"} else []
                 )
                 full_command = " ".join([command, *arguments])
                 self.send_menu(TelegramMenu("Action", (("Action", full_command),)))
@@ -256,6 +256,26 @@ class TelegramMenuTransportTests(unittest.TestCase):
                 self.handler.assert_not_called()
                 self.click(self.button("Confirm"))
                 self.handler.assert_called_once_with(command, arguments)
+
+    def test_emulator_pause_button_reaches_control_only_after_authorized_confirmation(self):
+        control = Mock()
+        control.runtime_command.return_value = {"emulators": [{
+            "instance": 0, "running": True, "automation": "enabled",
+        }]}
+        menu = TelegramControlMenu(
+            control, lambda command, arguments: _handle_telegram_command(command, arguments, control),
+        )
+        self.service.command_handler = menu.handle
+        self.send_menu(menu.handle("emulators", []))
+        self.click(self.button("Pause instance 0"))
+        control.runtime_command.assert_called_once_with("emulators.list")
+        confirm = self.button("Confirm")
+        self.click(confirm, user_id=124)
+        control.runtime_command.assert_called_once_with("emulators.list")
+        control.runtime_command.return_value = {"accepted": True, "state": "pause_requested"}
+        self.click(confirm)
+        control.runtime_command.assert_called_with("runtime.pause", {"instance": "0"})
+        self.assertIn("pause requested", self.calls[-1][1]["text"])
 
     def test_event_button_path_reaches_existing_profile_scoped_control_contract(self):
         event = TelegramControlMenuTests.event(self)
@@ -360,7 +380,9 @@ class TelegramMenuTransportTests(unittest.TestCase):
         self.send_menu(menu.handle("runtime", []))
         keyboard = self.calls[-1][1]["reply_markup"]["inline_keyboard"]
         self.assertEqual(
-            ["▶️ Start Runtime", "⏹️ Stop Runtime", "ℹ️ Status", "🏠 Main Menu"],
+            ["▶️ Start Runtime", "⏹️ Stop Runtime", "⏸️ Pause all emulators",
+             "▶️ Resume all (reinitialize)", "📱 Choose emulator",
+             "ℹ️ Status", "🏠 Main Menu"],
             [button["text"] for row in keyboard for button in row],
         )
         self.click(self.button("Main Menu"))

@@ -17,6 +17,7 @@ import requests
 from models.github_account import GitHubAccount, GitHubAssetUploader
 from services.github_auth_service import GitHubCredentials
 from services.package_service import PackageError
+from services.package_license_service import PackageLicenseService
 from ui.i18n.translator import t
 
 
@@ -334,33 +335,7 @@ class GitHubCatalogService:
         from services.managed_package_service import ManagedPackageService
 
         started = monotonic()
-        latest = {}
-        catalog = None
-        for page in range(1, 11):
-            if monotonic() - started > 120:
-                raise PackageError("GitHub publication comparison exceeded its time budget")
-            current = self.load(page=page)
-            if catalog is not None and current["repository_id"] != catalog["repository_id"]:
-                raise PackageError("GitHub catalog changed during publication comparison")
-            catalog = current
-            for entry in current["entries"]:
-                details = entry.get("package")
-                if (
-                    not details or details["game_id"] != game_id
-                    or details["publisher"].account_id != account.account_id
-                ):
-                    continue
-                key = details["package_id"]
-                version = tuple(int(part) for part in details["version"].split("."))
-                if key not in latest or version > latest[key][0]:
-                    latest[key] = (version, entry)
-            if current["next_page"] is None:
-                break
-        else:
-            raise PackageError("GitHub publication comparison exceeds 10 catalog pages")
-        entries = [item[1] for item in latest.values()]
-        if len(entries) > 30 or sum(entry["size"] for entry in entries) > self.MAX_DOWNLOAD_BYTES:
-            raise PackageError("GitHub publication comparison exceeds its package download budget")
+        catalog, entries = self._latest_publication_channels(game_id, account_id=account.account_id)
         fingerprints = {}
         with tempfile.TemporaryDirectory(prefix="botstudio-published-content-") as temporary:
             managed = ManagedPackageService(Path(temporary) / "managed", packages)
@@ -375,6 +350,92 @@ class GitHubCatalogService:
                     manifest["package_name"], manifest["package_type"],
                 )
         return fingerprints
+
+    def function_publication(self, function, packages):
+        """Find a live root-Function channel, never a same-name or dependency match."""
+        if not function.saved:
+            return None
+        game_id = packages._canonical_game_id(function.game_id)
+        kind = "helper" if function.kind == "helper" else "function"
+        identities = {}
+        for manifest, _ in packages.publication_sources([function]):
+            if (
+                manifest["game"]["id"] == game_id
+                and packages.matches_publication_source(manifest, function.function_id, kind)
+            ):
+                details = manifest["package_metadata"]
+                key = (f"github:{details['publisher']['account_id']}", details["package_id"])
+                identities[key] = manifest["source_id"]
+        if function.creator_account is not None:
+            for source_game in {game_id, function.game_id}:
+                package_id = PackageLicenseService.package_identity(kind, source_game, function.function_id)
+                identities[(f"github:{function.creator_account.account_id}", package_id)] = function.function_id
+        if not identities:
+            return None
+        catalog, entries = self._latest_publication_channels(game_id, identities)
+        from services.managed_package_service import ManagedPackageService
+
+        started = monotonic()
+        matches = []
+        with tempfile.TemporaryDirectory(prefix="botstudio-function-publication-") as temporary:
+            managed = ManagedPackageService(Path(temporary) / "managed", packages)
+            snapshot = {**catalog, "entries": entries}
+            for index, entry in enumerate(entries):
+                if monotonic() - started > 120:
+                    raise PackageError("GitHub publication lookup exceeded its time budget")
+                preview = self.download_preview(
+                    snapshot, entry, Path(temporary) / f"{index}.botstudio.zip", managed,
+                )
+                manifest = preview["manifest"]
+                details = manifest["package_metadata"]
+                key = (f"github:{details['publisher']['account_id']}", details["package_id"])
+                if manifest["package_type"] == kind and manifest.get("source_id") == identities[key]:
+                    matches.append(manifest)
+        if len(matches) > 1:
+            raise PackageError("multiple online package channels match this Function")
+        return matches[0] if matches else None
+
+    def next_publication_version(self, manifest):
+        details = manifest["package_metadata"]
+        key = (f"github:{details['publisher']['account_id']}", details["package_id"])
+        _, entries = self._latest_publication_channels(manifest["game"]["id"], {key})
+        proposed = tuple(int(part) for part in details["package_version"].split("."))
+        if entries:
+            latest = tuple(int(part) for part in entries[0]["package"]["version"].split("."))
+            proposed = max(proposed, (latest[0], latest[1], latest[2] + 1))
+        return ".".join(str(part) for part in proposed)
+
+    def _latest_publication_channels(self, game_id, identities=None, *, account_id=None):
+        latest = {}
+        started = monotonic()
+        repository_id = None
+        for page in range(1, 11):
+            if monotonic() - started > 120:
+                raise PackageError("GitHub publication lookup exceeded its time budget")
+            catalog = self.load(page=page)
+            if repository_id is not None and catalog["repository_id"] != repository_id:
+                raise PackageError("GitHub catalog changed during publication lookup")
+            repository_id = catalog["repository_id"]
+            for entry in catalog["entries"]:
+                details = entry.get("package")
+                if not details or details["game_id"] != game_id:
+                    continue
+                if account_id is not None and details["publisher"].account_id != account_id:
+                    continue
+                key = (f"github:{details['publisher'].account_id}", details["package_id"])
+                if identities is not None and key not in identities:
+                    continue
+                version = tuple(int(part) for part in details["version"].split("."))
+                if key not in latest or version > latest[key][0]:
+                    latest[key] = (version, entry)
+            if catalog["next_page"] is None:
+                break
+        else:
+            raise PackageError("GitHub publication lookup exceeds 10 catalog pages")
+        entries = [item[1] for item in latest.values()]
+        if len(entries) > 30 or sum(entry["size"] for entry in entries) > self.MAX_DOWNLOAD_BYTES:
+            raise PackageError("GitHub publication lookup exceeds its download budget")
+        return catalog, entries
 
     def check_archive_limits(self, archive_path):
         try:

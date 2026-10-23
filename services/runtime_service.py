@@ -1,9 +1,9 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from functools import partial
 from pathlib import Path
-from threading import Event, Lock
+from threading import Event, Lock, RLock
 from time import monotonic
 
 from core.emulator_manager import EmulatorManager
@@ -13,6 +13,8 @@ from services.app_config_service import AppConfigService
 from services.emulator_health_service import REASON_INSTANCE_STOPPED, STATE_FAILED, STATE_HEALTHY
 from services.emulator_health_service import STATE_QUEUED
 from services.emulator_health_service import EmulatorHealthService
+from services.emulator_pause_control import EmulatorPauseControl
+from services.emulator_runtime_workers import EmulatorRuntimeWorkers
 from services.game_runtime_service import GameRuntimeService
 from services.game_service import GameService
 from services.function_service import FunctionService
@@ -23,6 +25,7 @@ from services.ocr_service import OcrService
 from services.screen_service import ScreenService
 from models.execution_context import ExecutionContext
 from scheduler.models import Event as ScheduleEvent
+from scheduler.account_policy import AccountSchedulingPolicy, AccountWork
 from services.logging_service import get_logger
 from services.profile_service import ProfileService
 from services.runtime_heartbeat_service import RuntimeHeartbeatService
@@ -131,6 +134,8 @@ class RuntimeService:
         self._scheduler_profile_signatures = {}
         self._validation_profile_signatures = {}
         self._active_profiles = {}
+        self._account_policy = AccountSchedulingPolicy()
+        self._account_waiting_resources = set()
         self._idle_states = {}
         self._due_schedule_read_errors = set()
         self._activation_errors = {}
@@ -140,13 +145,15 @@ class RuntimeService:
         self._startup_emulator_deadlines = {}
 
         self.heartbeat = RuntimeHeartbeatService(
-            self.heartbeat_once,
+            self._dispatch_instance_cycles,
             heartbeat_interval_seconds,
         )
 
         self.running = False
         self.status = RUNTIME_STOPPED
         self.profile_statuses = []
+        self._enabled_profile_assignments = None
+        self._debug_profiles = []
         self.last_heartbeat_at = None
         self.last_health_at = None
         self.scheduler_parallel_workers = max(1, int(scheduler_parallel_workers or 1))
@@ -156,70 +163,187 @@ class RuntimeService:
         self._stop_event = Event()
         self._start_lock = Lock()
         self._stop_lock = Lock()
+        self._status_lock = RLock()
+        self._instance_workers = EmulatorRuntimeWorkers(
+            self._heartbeat_instance, self.check_execution_health,
+            heartbeat_interval_seconds, self.logger,
+        )
         self._stop_generation = 0
         self._pause_event = Event()
+        self._emulator_control = EmulatorPauseControl()
         self._health_failures = set()
         self._wake_resources = set()
         self.health_heartbeat = RuntimeHeartbeatService(self.check_execution_health, 2)
 
-    def pause(self):
-        if not self.running:
-            return self.get_status()
-        self._pause_event.set()
-        self.status = RUNTIME_PAUSED
+    def pause(self, instance=None):
+        if instance is not None:
+            instance = WatchdogEmulatorService._instance(instance)
+        with self._stop_lock:
+            if not self.running:
+                raise RuntimeError("Runtime is not running")
+            self._emulator_control.pause(instance)
+        self._update_runtime_status(self.profile_statuses)
+        self.logger.info("Runtime Emulator Pause Requested", instance=instance, all=instance is None)
         return self.get_status()
 
-    def resume(self):
-        self._pause_event.clear()
-        if self.running:
-            self.status = RUNTIME_RUNNING
+    def resume(self, instance=None):
+        if instance is not None:
+            instance = WatchdogEmulatorService._instance(instance)
+        with self._stop_lock:
+            if not self.running:
+                raise RuntimeError("Runtime is not running")
+            self._emulator_control.resume(instance)
+        self._update_runtime_status(self.profile_statuses)
+        self.logger.info("Runtime Emulator Resume Requested", instance=instance, all=instance is None)
         return self.get_status()
 
     @property
     def paused(self):
+        control = getattr(self, "_emulator_control", None)
+        if control is not None:
+            return self.running and control.all_paused
         pause_event = getattr(self, "_pause_event", None)
         return pause_event is not None and pause_event.is_set()
 
     def execution_cancelled(self, profile):
         resource = self._execution_resource_key(profile)
-        while (
-            self.paused and not self.is_stop_requested()
-            and resource not in getattr(self, "_health_failures", set())
-        ):
-            self._stop_event.wait(0.05)
-        return self.is_stop_requested() or (
+        return self.is_stop_requested() or self._assignment_changed(profile) or self.automation_paused(profile) or (
             resource in getattr(self, "_health_failures", set())
         )
 
-    def control_cancelled(self):
-        while self.paused and not self.is_stop_requested():
-            self._stop_event.wait(0.05)
-        return self.is_stop_requested()
+    def _assignment_changed(self, profile):
+        assignments = getattr(self, "_enabled_profile_assignments", None)
+        return assignments is not None and assignments.get(self._profile_id(profile)) != (
+            profile.get("game"), str(profile.get("emulator_instance")),
+        )
+
+    def control_cancelled(self, profile=None):
+        return self.is_stop_requested() or (
+            self._assignment_changed(profile) or self.automation_paused(profile)
+            if profile is not None else self.paused
+        )
+
+    def automation_paused(self, profile):
+        control = getattr(self, "_emulator_control", None)
+        return self.running and (self.paused or (
+            control is not None and control.blocked(profile.get("emulator_instance"))
+        ))
+
+    def _profile_control(self, profile):
+        control = getattr(self, "_emulator_control", None)
+        return (
+            control.operation(profile.get("emulator_instance"))
+            if control is not None else nullcontext(True)
+        )
+
+    def _paused_profile_status(self, profile):
+        return {
+            "profile_id": self._profile_id(profile),
+            "profile_name": profile.get("name"),
+            "game": {"id": profile.get("game")},
+            "emulator_instance": profile.get("emulator_instance"),
+            "state": "Paused",
+            "message": "Automation paused",
+        }
+
+    def _resume_emulators(self, profiles):
+        control = getattr(self, "_emulator_control", None)
+        if control is None:
+            return
+        control.register(profile.get("emulator_instance") for profile in profiles)
+        for instance, generation in control.ready():
+            targets = [
+                profile for profile in profiles
+                if str(profile.get("emulator_instance")) == instance
+            ]
+            if not targets:
+                continue
+            if any(
+                lock.locked()
+                for key, lock in list(self._profile_execution_locks.items())
+                if key.rsplit(":emulator:", 1)[-1] == instance
+            ):
+                continue
+            try:
+                if self.is_stop_requested():
+                    return
+                activation_errors = self._find_activation_errors(targets)
+                if hasattr(self, "_account_policy"):
+                    self._account_policy.reset_instance(instance)
+                    for target in targets:
+                        identity = self._profile_id(target)
+                        self._account_policy.waiting_since.pop(identity, None)
+                        self._account_policy.last_served.pop(identity, None)
+                for profile in targets:
+                    profile_id = self._profile_id(profile)
+                    for status in self.profile_statuses:
+                        if status.get("profile_id") == profile_id:
+                            status.update(
+                                state="Resuming", message="Fresh startup checks pending",
+                                checked_at=0,
+                            )
+                    self._activation_errors.pop(profile_id, None)
+                    if profile_id in activation_errors:
+                        self._activation_errors[profile_id] = activation_errors[profile_id]
+                    resource = self._execution_resource_key(profile)
+                    self._scheduler_profile_signatures.pop(profile_id, None)
+                    self._validation_profile_signatures.pop(profile_id, None)
+                    self._active_profiles.pop(
+                        (profile.get("game", ""), profile.get("emulator_instance")), None,
+                    )
+                    self._idle_states.pop(resource, None)
+                    self._health_failures.discard(resource)
+                    self._wake_resources.discard(resource)
+                    self._startup_pending_profiles.add(profile_id)
+                    self._startup_profile_attempts.pop(profile_id, None)
+                    self._startup_checked_resources.discard(resource)
+                    self._startup_emulator_deadlines.pop(resource, None)
+                    self.recovery_service.clear_profile(profile)
+                    self._activate_profile_variables(profile, invalidate_live=True)
+                    self._ensure_init_event(profile.get("game", ""), profile_id)
+                    self.scheduler_service.ensure_interrupt_event(profile.get("game", ""), profile_id)
+                control.finish_resume(instance, generation)
+                self.logger.info("Runtime Emulator Reinitialization Prepared", instance=instance)
+            except Exception as error:
+                control.finish_resume(instance, generation, error)
+                self.logger.error(
+                    "Runtime Emulator Resume Failed", instance=instance, error=repr(error),
+                    next_action="fix the error and request resume again",
+                )
 
     def _publish_profile_status(self, status):
-        self.profile_statuses = [
-            item for item in getattr(self, "profile_statuses", [])
-            if item.get("profile_id") != status.get("profile_id")
-        ] + [status]
-        self._update_runtime_status(self.profile_statuses)
+        with getattr(self, "_status_lock", nullcontext()):
+            self.profile_statuses = [
+                item for item in getattr(self, "profile_statuses", [])
+                if item.get("profile_id") != status.get("profile_id")
+            ] + [status]
+            self._update_runtime_status(self.profile_statuses)
 
     def _update_runtime_status(self, statuses):
         if self.is_stop_requested():
             self.status = RUNTIME_STOPPED
         elif self.paused:
             self.status = RUNTIME_PAUSED
-        elif any(item.get("state") == STATE_FAILED for item in statuses):
+        elif any(
+            item.get("state") == STATE_FAILED and not self.automation_paused(item)
+            for item in statuses
+        ):
             self.status = RUNTIME_ERROR
-        elif any(item.get("state") == "Recovering" for item in statuses):
+        elif any(
+            item.get("state") == "Recovering" and not self.automation_paused(item)
+            for item in statuses
+        ):
             self.status = RUNTIME_RECOVERING
         else:
             self.status = RUNTIME_RUNNING
 
-    def check_execution_health(self):
+    def check_execution_health(self, instance=None):
         if self.is_stop_requested():
             return
         generation = self._stop_generation
         for status in list(self.profile_statuses):
+            if instance is not None and str(status.get("emulator_instance")) != str(instance):
+                continue
             if status.get("state") != STATE_HEALTHY or not status.get("device_id"):
                 continue
             profile = {
@@ -231,23 +355,35 @@ class RuntimeService:
             resource = self._execution_resource_key(profile)
             device = status["device_id"]
             package = status.get("game", {}).get("package_name")
+            control = getattr(self, "_emulator_control", None)
+            epoch = control.epoch(profile.get("emulator_instance")) if control is not None else 0
             try:
-                responsive = self.adb_runtime_service.adb.is_responsive(device, timeout=2)
-                game_running = responsive and (
-                    not package or self.game_runtime_service.adb.get_package_pid(
-                        device, package, timeout=2,
-                    ) is not None
-                )
-                if game_running and package:
-                    game_running = not self.game_runtime_service.adb.has_anr(
-                        device, package, timeout=2,
-                    )
-                screen_available = game_running and self.emulator_health_service.probe_screenshot(device)
+                with self._profile_control(profile) as admitted:
+                    if not admitted:
+                        continue
+                    with command_control(partial(self.control_cancelled, profile)):
+                        responsive = self.adb_runtime_service.adb.is_responsive(device, timeout=2)
+                        game_running = responsive and (
+                            not package or self.game_runtime_service.adb.get_package_pid(
+                                device, package, timeout=2,
+                            ) is not None
+                        )
+                        if game_running and package:
+                            game_running = not self.game_runtime_service.adb.has_anr(
+                                device, package, timeout=2,
+                            )
+                        screen_available = game_running and self.emulator_health_service.probe_screenshot(device)
+            except CommandCancelled:
+                continue
             except Exception as error:
                 self.logger.error("Runtime Health Probe Failed", **self._metadata(profile), error=repr(error))
                 responsive = game_running = screen_available = False
             if self.is_stop_requested() or generation != self._stop_generation:
                 return
+            if self.automation_paused(profile):
+                continue
+            if control is not None and control.epoch(profile.get("emulator_instance")) != epoch:
+                continue
             if not any(item is status for item in self.profile_statuses) or status.get("state") != STATE_HEALTHY:
                 continue
             status["checked_at"] = monotonic()
@@ -285,13 +421,26 @@ class RuntimeService:
         return f"{game_id}:emulator:{emulator_instance}"
 
     def try_acquire_profile_execution(self, profile: dict | str) -> bool:
+        if isinstance(profile, dict) and self.automation_paused(profile):
+            return False
         resource_key = (
             self._execution_resource_key(profile)
             if isinstance(profile, dict)
             else str(profile)
         )
-        lock = self._profile_execution_locks.setdefault(resource_key, Lock())
-        return lock.acquire(blocking=False)
+        control = getattr(self, "_emulator_control", None)
+        if control is not None and self.running and ":emulator:" in resource_key:
+            if control.blocked(resource_key.rsplit(":emulator:", 1)[-1]):
+                return False
+        operation = (
+            control.operation(resource_key.rsplit(":emulator:", 1)[-1])
+            if control is not None and self.running else nullcontext(True)
+        )
+        with operation as admitted:
+            if not admitted:
+                return False
+            lock = self._profile_execution_locks.setdefault(resource_key, Lock())
+            return lock.acquire(blocking=False)
 
     def release_profile_execution(self, profile: dict | str) -> None:
         resource_key = (
@@ -344,6 +493,9 @@ class RuntimeService:
             heartbeat = getattr(self, "heartbeat", None)
             if heartbeat is not None and not heartbeat.wait_until_idle(0):
                 raise RuntimeError("Previous runtime execution is still stopping")
+            workers = getattr(self, "_instance_workers", None)
+            if workers is not None and not workers.idle():
+                raise RuntimeError("Previous emulator execution is still stopping")
             if any(lock.locked() for lock in getattr(self, "_profile_execution_locks", {}).values()):
                 raise RuntimeError("Previous profile execution is still stopping")
             return self._start()
@@ -361,6 +513,8 @@ class RuntimeService:
         try:
             if self.running or not self.heartbeat.wait_until_idle(0):
                 raise RuntimeError("Stop Runtime before importing active package content")
+            if not self._instance_workers.idle():
+                raise RuntimeError("Previous emulator execution is still stopping")
             if any(lock.locked() for lock in self._profile_execution_locks.values()):
                 raise RuntimeError("Previous profile execution is still stopping")
             if self.execution_activity.snapshot():
@@ -387,6 +541,12 @@ class RuntimeService:
 
         self.adb_runtime_service.server_available()
 
+        if hasattr(self, "_emulator_control"):
+            self._emulator_control = EmulatorPauseControl()
+            self._emulator_control.register(
+                profile.get("emulator_instance")
+                for profile in self.profile_service.load_enabled()
+            )
         self.running = True
         self.profile_statuses = []
         if hasattr(self, "_pause_event"):
@@ -402,6 +562,8 @@ class RuntimeService:
         self._scheduler_profile_signatures.clear()
         self._validation_profile_signatures.clear()
         self._active_profiles.clear()
+        self._account_policy = AccountSchedulingPolicy()
+        self._account_waiting_resources = set()
         self._idle_states.clear()
         self._startup_pending_profiles = {
             self._profile_id(profile) for profile in self.profile_service.load_enabled()
@@ -429,11 +591,10 @@ class RuntimeService:
             self.status = RUNTIME_STOPPED
             return self.get_status()
 
-        if hasattr(self, "health_heartbeat"):
-            self.health_heartbeat.start()
-        self.heartbeat_once()
-        if not self.is_stop_requested():
-            self.heartbeat.start()
+        self._dispatch_instance_cycles()
+        with self._stop_lock:
+            if not self.is_stop_requested():
+                self.heartbeat.start()
 
         return self.get_status()
 
@@ -454,16 +615,78 @@ class RuntimeService:
         )
 
         self.heartbeat.stop()
+        workers = getattr(self, "_instance_workers", None)
+        if workers is not None:
+            workers.stop()
         self.running = False
         self.status = RUNTIME_STOPPED
 
         return self.get_status()
 
-    def heartbeat_once(
-        self,
-    ):
+    def _dispatch_instance_cycles(self):
+        if self.is_stop_requested():
+            return
+        profiles = self.profile_service.load_enabled()
+        with self._stop_lock:
+            if self.is_stop_requested():
+                return
+            self._enabled_profile_assignments = {
+                self._profile_id(profile): (
+                    profile.get("game"), str(profile.get("emulator_instance")),
+                ) for profile in profiles
+            }
+            self._debug_profiles = [{
+                "profile_id": self._profile_id(profile),
+                "profile_name": profile.get("name"),
+                "emulator_instance": profile.get("emulator_instance"),
+            } for profile in profiles]
+            self._instance_workers.reconcile(
+                profile.get("emulator_instance") for profile in profiles
+            )
+        active_ids = {self._profile_id(profile) for profile in profiles}
+        with self._status_lock:
+            self.profile_statuses = [
+                status for status in self.profile_statuses
+                if status.get("profile_id") in active_ids
+            ]
 
-        if self.is_stop_requested() or self.paused:
+    def _heartbeat_instance(self, instance):
+        if self.is_stop_requested():
+            return
+        profiles = [
+            profile for profile in self.profile_service.load_enabled()
+            if str(profile.get("emulator_instance")) == instance
+        ]
+        if profiles:
+            self.heartbeat_once(profiles)
+
+    def request_schedule(self, profile_id):
+        profile = self.profile_service.get_profile(profile_id)
+        if profile is None:
+            raise ValueError("queued event profile is no longer available")
+        if not self.running:
+            if not profile.get("enabled", False):
+                self.logger.warning(
+                    "Manual Run Start Skipped",
+                    profile=profile_id,
+                    reason="profile_disabled",
+                )
+                return False
+            # Run Selected on a stopped Runtime starts it; the durable due-now
+            # request then wins the first cycle after the normal start/Init gate.
+            self.logger.info("Runtime Start Requested By Manual Run", profile=profile_id)
+            self.start()
+        if not self.running or self.is_stop_requested():
+            return False
+        if self.automation_paused(profile):
+            return False
+        if not self._instance_workers.request_cycle(profile.get("emulator_instance")):
+            return self.heartbeat.request_tick()
+        return True
+
+    def heartbeat_once(self, enabled_profiles=None):
+
+        if self.is_stop_requested():
             return self.get_status()
 
         self.last_heartbeat_at = datetime.now(timezone.utc).isoformat()
@@ -471,13 +694,17 @@ class RuntimeService:
         statuses = []
         healthy_profiles = []
 
-        enabled_profiles = (
-            self.profile_service.load_enabled()
-        )
+        scoped = enabled_profiles is not None
+        if enabled_profiles is None:
+            enabled_profiles = self.profile_service.load_enabled()
+        self._resume_emulators(enabled_profiles)
 
-        due_profile_scores = self._profiles_with_due_events(enabled_profiles)
+        runnable_profiles = [
+            profile for profile in enabled_profiles if not self.automation_paused(profile)
+        ]
+        due_profile_scores = self._profiles_with_due_events(runnable_profiles)
         eligible_profiles = [
-            profile for profile in enabled_profiles
+            profile for profile in runnable_profiles
             if self._profile_id(profile) not in self._activation_errors
         ]
         pending_profiles = [
@@ -485,13 +712,13 @@ class RuntimeService:
             if self._profile_id(profile) in self._startup_pending_profiles
         ]
         pending_resources = {
-            self._execution_resource_key(profile) for profile in pending_profiles
+            str(profile.get("emulator_instance")) for profile in pending_profiles
         }
         pending_attempts = {
             resource: min(
                 self._startup_profile_attempts.get(self._profile_id(profile), 0)
                 for profile in pending_profiles
-                if self._execution_resource_key(profile) == resource
+                if str(profile.get("emulator_instance")) == resource
             )
             for resource in pending_resources
         }
@@ -501,19 +728,22 @@ class RuntimeService:
             )
             for profile in pending_profiles
             if self._startup_profile_attempts.get(self._profile_id(profile), 0)
-            == pending_attempts[self._execution_resource_key(profile)]
+            == pending_attempts[str(profile.get("emulator_instance"))]
         }
         selection_scores.update({
             self._profile_id(profile): due_profile_scores[self._profile_id(profile)]
             for profile in eligible_profiles
             if self._profile_id(profile) in due_profile_scores
-            and self._execution_resource_key(profile) not in pending_resources
+            and str(profile.get("emulator_instance")) not in pending_resources
         })
+        selection_scores = self._select_account_batches(
+            eligible_profiles, selection_scores, pending_resources,
+        )
         preferred_profile_ids = set(self._active_profiles.values())
         due_resources = {
             self._execution_resource_key(profile)
             for profile in enabled_profiles
-            if self._profile_id(profile) in due_profile_scores
+            if self._profile_id(profile) in selection_scores
         }
         unknown_schedule_resources = {
             self._execution_resource_key(profile)
@@ -532,9 +762,23 @@ class RuntimeService:
             preferred_profile_ids=preferred_profile_ids,
             due_profile_scores=selection_scores,
         )
+        physical_candidates = {}
+        for profile in eligible_profiles:
+            if self._profile_id(profile) not in queue_assignments:
+                physical_candidates.setdefault(str(profile.get("emulator_instance")), []).append(profile)
+        for candidates in physical_candidates.values():
+            ordered = sorted(candidates, key=lambda profile: SchedulerService._queue_instance_sort_key(
+                profile, any(self._profile_id(item) in selection_scores for item in candidates),
+                preferred_profile_ids, selection_scores,
+            ))
+            for position, profile in enumerate(ordered[1:], 1):
+                queue_assignments[self._profile_id(profile)] = {
+                    "position": position, "ahead": ordered[0].get("name"),
+                    "reason": "shared_instance",
+                }
 
         for profile in enabled_profiles:
-            if self.is_stop_requested() or self.paused:
+            if self.is_stop_requested():
                 break
 
             profile_id = profile.get(
@@ -543,9 +787,20 @@ class RuntimeService:
             )
             queue_info = queue_assignments.get(profile_id)
 
+            if self.automation_paused(profile):
+                statuses.append(self._paused_profile_status(profile))
+                continue
+
             if profile_id in self._activation_errors:
                 status = self._activation_error_status(profile)
                 statuses.append(status)
+                continue
+
+            planning_error = getattr(self, "_account_planning_errors", {}).get(
+                str(profile.get("emulator_instance")),
+            )
+            if planning_error is not None:
+                statuses.append(self._profile_cycle_error_status(profile, planning_error))
                 continue
 
             if queue_info:
@@ -554,15 +809,23 @@ class RuntimeService:
                 continue
 
             if (
-                self._profile_id(profile) not in due_profile_scores
-                and self._execution_resource_key(profile) not in pending_resources
+                self._profile_id(profile) not in selection_scores
+                and str(profile.get("emulator_instance")) not in pending_resources
                 and self._execution_resource_key(profile) not in unknown_schedule_resources
+                and str(profile.get("emulator_instance"))
+                not in getattr(self, "_account_waiting_resources", set())
             ):
                 try:
-                    with command_control(self.control_cancelled):
-                        idle_status = self._apply_idle_behavior(profile)
+                    with self._profile_control(profile) as admitted:
+                        if not admitted:
+                            statuses.append(self._paused_profile_status(profile))
+                            continue
+                        with command_control(partial(self.control_cancelled, profile)):
+                            idle_status = self._apply_idle_behavior(profile)
                 except CommandCancelled:
-                    break
+                    if self.automation_paused(profile):
+                        statuses.append(self._paused_profile_status(profile))
+                    continue
                 if idle_status:
                     statuses.append(idle_status)
                     continue
@@ -572,10 +835,16 @@ class RuntimeService:
                     self._startup_profile_attempts[profile_id] = (
                         self._startup_profile_attempts.get(profile_id, 0) + 1
                     )
-                with command_control(self.control_cancelled):
-                    status = self._validate_profile(profile)
+                with self._profile_control(profile) as admitted:
+                    if not admitted:
+                        statuses.append(self._paused_profile_status(profile))
+                        continue
+                    with command_control(partial(self.control_cancelled, profile)):
+                        status = self._validate_profile(profile)
             except CommandCancelled:
-                break
+                if self.automation_paused(profile):
+                    statuses.append(self._paused_profile_status(profile))
+                continue
             except Exception as error:
                 status = self._profile_cycle_error_status(profile, error)
                 self.logger.error(
@@ -599,11 +868,19 @@ class RuntimeService:
                     )
                 healthy_profiles.append((status, profile))
 
-        self.profile_statuses = statuses
-        self._update_runtime_status(statuses)
+        with getattr(self, "_status_lock", nullcontext()):
+            if scoped:
+                instances = {str(profile.get("emulator_instance")) for profile in enabled_profiles}
+                self.profile_statuses = [
+                    status for status in self.profile_statuses
+                    if str(status.get("emulator_instance")) not in instances
+                ] + statuses
+            else:
+                self.profile_statuses = statuses
+            self._update_runtime_status(self.profile_statuses)
         self._run_schedules_parallel(healthy_profiles)
 
-        self._update_runtime_status(statuses)
+        self._update_runtime_status(self.profile_statuses)
 
         return self.get_status()
 
@@ -662,7 +939,7 @@ class RuntimeService:
 
     def _profile_cycle_error_status(self, profile, error):
         return {
-            "profile_id": profile.get("id"),
+            "profile_id": self._profile_id(profile),
             "profile_name": profile.get("name"),
             "game": {
                 "id": profile.get("game"),
@@ -696,7 +973,9 @@ class RuntimeService:
 
     def _profiles_with_due_events(self, profiles):
         due_profile_scores = {}
-        self._due_schedule_read_errors = set()
+        self._due_schedule_read_errors.difference_update(
+            self._profile_id(profile) for profile in profiles
+        )
         list_events = getattr(self.scheduler_service, "list_execution_events", None)
         if not callable(list_events):
             self._due_schedule_read_errors.update(
@@ -748,6 +1027,108 @@ class RuntimeService:
                     next_action="do not infer due work or apply idle behavior; retry next heartbeat",
                 )
         return due_profile_scores
+
+    def _select_account_batches(self, profiles, due_scores, pending_resources=()):
+        policy = getattr(self, "_account_policy", None)
+        if policy is None:
+            policy = self._account_policy = AccountSchedulingPolicy()
+        if not hasattr(self, "_account_waiting_resources"):
+            self._account_waiting_resources = set()
+        if not hasattr(self, "_account_planning_errors"):
+            self._account_planning_errors = {}
+        scores = dict(due_scores)
+        groups = {}
+        for profile in profiles:
+            groups.setdefault(str(profile.get("emulator_instance")), []).append(profile)
+        for instance, group in groups.items():
+            self._account_waiting_resources.discard(instance)
+            self._account_planning_errors.pop(instance, None)
+            work = {}
+            settings = {}
+            try:
+                now = datetime.now(timezone.utc)
+                for profile in group:
+                    identity = self._profile_id(profile)
+                    settings[identity] = self.app_config_service.get_scheduling_settings(
+                        self.game_service, profile.get("game", ""),
+                    )
+                    events = self.scheduler_service.list_events(
+                        profile.get("game", ""), profile_id=identity,
+                    )
+                    measured = AccountWork.from_events(events, now, 0)
+                    work[identity] = AccountWork.from_events(
+                        events, now, policy.horizon(settings[identity], measured.switch_seconds),
+                    )
+                if instance in pending_resources and not any(
+                    item.queued_at is not None for item in work.values()
+                ):
+                    policy.reasons[instance] = "startup_checks_pending"
+                    continue
+                target = policy.choose(group, work, settings, monotonic())
+            except (OSError, ValueError, TypeError, AttributeError) as error:
+                self._account_planning_errors[instance] = error
+                self._due_schedule_read_errors.update(self._profile_id(p) for p in group)
+                self.logger.error(
+                    "Runtime Account Planning Failed",
+                    emulator_instance=instance, error=repr(error),
+                    next_action="do not switch or execute; do not apply idle; retry next cycle",
+                )
+                continue
+            for profile in group:
+                scores.pop(self._profile_id(profile), None)
+            if target is not None and policy.reasons[instance] != "no_due_work":
+                scores[target] = due_scores.get(target, (1, "0001-01-01T00:00:00+00:00"))
+                if not work[target].due_tasks:
+                    self._account_waiting_resources.add(instance)
+                self.logger.debug(
+                    "Runtime Account Batch Selected",
+                    emulator_instance=instance, profile_id=target,
+                    reason=policy.reasons[instance],
+                    due_tasks=work[target].due_tasks,
+                    upcoming_tasks=work[target].upcoming_tasks,
+                    oldest_overdue_seconds=round(work[target].oldest_seconds),
+                    switch_cost_seconds=round(work[target].switch_seconds, 2),
+                )
+        return scores
+
+    def _continue_account_batch(self, profile, manual_only=False):
+        if self.execution_cancelled(profile):
+            return False
+        instance = str(profile.get("emulator_instance"))
+        profiles = [
+            candidate for candidate in self.profile_service.load_enabled()
+            if str(candidate.get("emulator_instance")) == instance
+            and not self.automation_paused(candidate)
+            and self._profile_id(candidate) not in self._activation_errors
+        ]
+        if not manual_only and any(
+            self._profile_id(p) in self._startup_pending_profiles for p in profiles
+        ):
+            return False
+        scores = self._profiles_with_due_events(profiles)
+        chosen = self._select_account_batches(
+            profiles, scores, pending_resources=(instance,) if manual_only else (),
+        )
+        if (
+            manual_only
+            and instance not in getattr(self, "_account_planning_errors", {})
+            and self._account_policy.reasons.get(instance) != "manual_request"
+        ):
+            return True
+        return (
+            instance not in getattr(self, "_account_planning_errors", {})
+            and (
+                self._profile_id(profile) in chosen
+                or (
+                    not chosen
+                    and self._account_policy.active.get(instance) == self._profile_id(profile)
+                )
+            )
+        )
+
+    def _after_scheduled_event(self, profile):
+        self._account_policy.served(profile, monotonic())
+        return self._continue_account_batch(profile)
 
     def _apply_idle_behavior(self, profile):
         game_id = str(profile.get("game") or "")
@@ -828,7 +1209,8 @@ class RuntimeService:
         state["applied"] = behavior
         active_profile_id = self._active_profiles.get((game_id, instance))
         if active_profile_id:
-            self._scheduler_profile_signatures.pop(active_profile_id, None)
+            if behavior == "close_emulator":
+                self._scheduler_profile_signatures.pop(active_profile_id, None)
             self._validation_profile_signatures.pop(active_profile_id, None)
         self.logger.info(
             "Runtime Idle Behavior Applied",
@@ -935,14 +1317,19 @@ class RuntimeService:
     def _run_profile_schedule(self, profile):
         if self.is_stop_requested():
             return {"status": "stopped", "events": [], "interrupt": None}
-        if not self.try_acquire_profile_execution(profile):
-            return {"status": "busy", "events": [], "interrupt": None}
-        try:
-            return self._run_profile_schedule_unlocked(profile)
-        finally:
-            self.release_profile_execution(profile)
+        with self._profile_control(profile) as admitted:
+            if not admitted:
+                return {"status": "paused", "events": [], "interrupt": None}
+            if not self.try_acquire_profile_execution(profile):
+                return {"status": "busy", "events": [], "interrupt": None}
+            try:
+                return self._run_profile_schedule_unlocked(profile)
+            finally:
+                self.release_profile_execution(profile)
 
     def _run_profile_schedule_unlocked(self, profile):
+        if not hasattr(self, "_account_policy"):
+            self._account_policy = AccountSchedulingPolicy()
         profile_id = profile.get("botstudio_profile_id", profile.get("id", ""))
         signature = (
             profile_id,
@@ -968,29 +1355,16 @@ class RuntimeService:
         if init_result is not None and init_result.get("status") not in {"success", "idle"}:
             return {"init": init_result, "events": [], "interrupt": None}
 
-        kwargs = {
-            "profile": runnable,
-            "function_root": self.scheduler_function_root,
-            "limit": None if init_result is not None else self.scheduler_event_limit,
-            "overdue_only": init_result is not None,
-            "priority_first": init_result is not None,
-            "cancellation_checker": partial(self.execution_cancelled, runnable),
-        }
-        if self.scheduler_runner_factory is not None:
-            kwargs["runner_factory"] = self.scheduler_runner_factory
-            kwargs["variable_service"] = self.variable_service
+        self._account_policy.activate(profile, monotonic())
         regular_results = []
         interrupt_results = []
-        for _ in range(self.interrupt_burst_limit):
-            events = self.scheduler_service.run_due_events(
-                runnable.get("game", ""),
-                **kwargs,
-            )
-            regular_results.extend(events)
+        # Interrupt runs at every event boundary: between batch events and
+        # before the account may be left, never inside a running event.
+        boundary = {"after_events": 0, "covered": 0, "failed": False}
 
-            if self.interrupts_paused(runnable):
-                break
-
+        def run_interrupt():
+            if self.execution_cancelled(runnable) or self.interrupts_paused(runnable):
+                return True
             interrupt_result = self.scheduler_service.run_event(
                 interrupt_event,
                 profile=runnable,
@@ -1001,6 +1375,54 @@ class RuntimeService:
             )
             interrupt_results.append(interrupt_result)
             if interrupt_result.get("status") != "success":
+                boundary["failed"] = True
+                return False
+            return True
+
+        def between_events():
+            boundary["after_events"] += 1
+            boundary["covered"] = boundary["after_events"]
+            if not run_interrupt():
+                return False
+            return self._after_scheduled_event(runnable)
+
+        kwargs = {
+            "profile": runnable,
+            "function_root": self.scheduler_function_root,
+            "limit": None if init_result is not None else self.scheduler_event_limit,
+            "overdue_only": init_result is not None,
+            "priority_first": init_result is not None,
+            "cancellation_checker": partial(self.execution_cancelled, runnable),
+            "continuation_checker": between_events,
+        }
+        if self.scheduler_runner_factory is not None:
+            kwargs["runner_factory"] = self.scheduler_runner_factory
+            kwargs["variable_service"] = self.variable_service
+        for _ in range(self.interrupt_burst_limit):
+            if self.execution_cancelled(runnable):
+                break
+            if not self._continue_account_batch(runnable, manual_only=True):
+                run_interrupt()
+                break
+            boundary.update(after_events=0, covered=0)
+            events = self.scheduler_service.run_due_events(
+                runnable.get("game", ""),
+                **kwargs,
+            )
+            regular_results.extend(events)
+            if events:
+                policy = getattr(self, "_account_policy", None)
+                if policy is not None:
+                    policy.served(profile, monotonic())
+
+            if boundary["failed"]:
+                break
+            if (not events or len(events) > boundary["covered"]) and not run_interrupt():
+                break
+            if self.interrupts_paused(runnable):
+                break
+
+            if not self._continue_account_batch(runnable):
                 break
 
             regular_due = [
@@ -1262,6 +1684,7 @@ class RuntimeService:
 
             if command == "event.run_now":
                 event = self.scheduler_service.queue_event_now(event)
+                self.request_schedule(profile_id)
             else:
                 event.enabled = command == "event.enable"
 
@@ -1292,10 +1715,35 @@ class RuntimeService:
     def get_status(
         self,
     ):
+        control = getattr(self, "_emulator_control", None)
+        pauses = control.snapshot() if control is not None and self.running else {}
+        for instance, pause in pauses.items():
+            pause["active_operations"] = max(pause["active_operations"], sum(
+                lock.locked()
+                for key, lock in list(getattr(self, "_profile_execution_locks", {}).items())
+                if key.rsplit(":emulator:", 1)[-1] == instance
+            ))
+            if pause["state"] == "paused" and pause["active_operations"]:
+                pause["state"] = "pausing"
         profiles = []
         for status in self.profile_statuses:
             snapshot = dict(status)
-            if not self.running or (
+            pause = pauses.get(str(snapshot.get("emulator_instance")))
+            if self.running and (pause is not None or self.paused):
+                state = pause["state"] if pause else "paused"
+                snapshot.update(
+                    state={
+                        "resuming": "Resuming", "pausing": "Pausing",
+                        "paused": "Paused",
+                    }[state],
+                    message=(pause.get("error") if pause else None) or (
+                        "Waiting for old automation to finish; then reinitialize"
+                        if state == "resuming" else
+                        "Cancelling old automation; wait before manual use"
+                        if state == "pausing" else "Automation paused"
+                    ),
+                )
+            elif not self.running or (
                 snapshot.get("state") == STATE_HEALTHY
                 and monotonic() - snapshot.get("checked_at", 0) > 15
             ):
@@ -1305,8 +1753,11 @@ class RuntimeService:
             "running": self.running,
             "status": self.status,
             "profiles": profiles,
+            "debug_profiles": list(getattr(self, "_debug_profiles", [])),
             "last_heartbeat_at": self.last_heartbeat_at,
             "last_health_at": getattr(self, "last_health_at", None),
+            "paused_emulators": pauses,
+            "pause_all": self.paused,
         }
 
     def get_recovery_state(self):
@@ -1529,21 +1980,42 @@ class RuntimeService:
             "botstudio_profile_id",
             profile.get("id", ""),
         )
-        self._scheduler_profile_signatures.pop(profile_id, None)
         self._validation_profile_signatures.pop(profile_id, None)
-        self._active_profiles.pop(
-            (profile.get("game", ""), profile.get("emulator_instance")),
-            None,
-        )
 
+        recovery_status = dict(status)
         status.update(state="Recovering", message="Recovering session")
         self._publish_profile_status(status)
         recovered = self.recovery_service.recover_profile(
             profile,
-            status,
+            recovery_status,
         )
 
-        self._activate_profile_variables(profile, reset=True)
+        if recovered.get("emulator_started") is True:
+            instance = str(profile.get("emulator_instance"))
+            for identity, signature in list(self._scheduler_profile_signatures.items()):
+                if str(signature[2]) == instance:
+                    self._scheduler_profile_signatures.pop(identity, None)
+                    self._validation_profile_signatures.pop(identity, None)
+            for key, active_id in list(self._active_profiles.items()):
+                if str(key[1]) == instance:
+                    self._active_profiles.pop(key, None)
+                    self._scheduler_profile_signatures.pop(active_id, None)
+                    self._validation_profile_signatures.pop(active_id, None)
+            self._scheduler_profile_signatures.pop(profile_id, None)
+            if hasattr(self, "_account_policy"):
+                self._account_policy.reset_instance(instance)
+            self._activate_profile_variables(profile, reset=True)
+        elif recovered.get("game_init_required") is True:
+            self._scheduler_profile_signatures.pop(profile_id, None)
+            self._activate_profile_variables(profile, reset=True)
+            self.logger.info(
+                "Game Recovery Init Required",
+                **self._metadata(profile),
+                reason=recovered.get("message"),
+                next_action="run Init after game health and startup screen validation",
+            )
+        else:
+            self._activate_profile_variables(profile, invalidate_live=True)
 
         status["state"] = recovered["state"]
         status["message"] = recovered["message"]
@@ -1567,6 +2039,15 @@ class RuntimeService:
         target_id = self._profile_id(profile)
         current_id = self._active_profiles.get(key)
         switch_required = bool(current_id) and current_id != target_id
+        other_keys = [
+            other for other in self._active_profiles
+            if other != key and str(other[1]) == str(instance)
+        ]
+        if other_keys:
+            switch_required = True
+            for other in other_keys:
+                previous_id = self._active_profiles.pop(other)
+                self._scheduler_profile_signatures.pop(previous_id, None)
         self._activate_profile_variables(
             profile,
             invalidate_live=switch_required,

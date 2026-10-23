@@ -41,3 +41,16 @@ class PackageOutboxService:
         if hashlib.sha256(path.read_bytes()).hexdigest() != sha256:
             raise PackageError("prepared archive changed during upload")
         atomic_write_json(path.with_suffix(".uploaded.json"), publication)
+
+    def upload(self, path, managed, submission):
+        """Worker-only, explicitly requested exact-byte upload of a prepared archive."""
+        path = Path(path)
+        if path.parent.resolve() != self.root.resolve():
+            raise PackageError("upload archive is not in the prepared package list")
+        if path.with_suffix(".uploaded.json").exists():
+            raise PackageError("prepared archive has already been submitted")
+        preview = managed.preview(path)
+        plan = submission.prepare(path, expected_sha256=preview["archive_sha256"])
+        publication = submission.submit(path, plan=plan)
+        self.uploaded(path, preview["archive_sha256"], publication)
+        return publication

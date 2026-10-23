@@ -13,6 +13,7 @@ from core.adb_service import (
 )
 from services.reinitialize_service import get_default_reinitialize_service
 from services.file_io import atomic_write_json
+from services.app_config_service import AppConfigService
 
 
 GAME_STORE_LOCK = RLock()
@@ -244,6 +245,30 @@ class GameService:
             config["package_name"] = game["package_name"]
 
         return config
+
+    def get_scheduling_overrides(self, game_id: str) -> dict:
+        game = self.get_game(game_id) or {}
+        return AppConfigService.validate_scheduling_settings(
+            game.get("scheduling_overrides", {})
+        )
+
+    @game_store_locked
+    def save_scheduling_overrides(
+        self, game_id: str, overrides: dict | None
+    ) -> dict:
+        validated = AppConfigService.validate_scheduling_settings(
+            {} if overrides is None else overrides
+        )
+        games = self.load()
+        for game in games:
+            if game["id"] == game_id:
+                if validated:
+                    game["scheduling_overrides"] = validated
+                else:
+                    game.pop("scheduling_overrides", None)
+                self.save(games)
+                return dict(validated)
+        raise ValueError(f"Unknown game: {game_id}")
 
     def legacy_init_function_ids(
         self,

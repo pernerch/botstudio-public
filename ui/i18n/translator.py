@@ -109,7 +109,7 @@ STRINGS = {
         "packages.submission_check": "Check catalog submission",
         "packages.submission_send": "Submit package as GitHub pull request...",
         "packages.submission_consent": "Send these exact package bytes PUBLICLY to {repository} (repository ID {repository_id})?\n\nAccount: @{login}\nGame: {game}\nPackage: {package} {version}\nSize: {size} bytes\nSHA-256: {sha256}\nTarget: {branch} at {commit}\n\nThis creates/reuses your technical contribution fork, adds a new branch with the archive and submission metadata, and opens a pull request. For the catalog owner, the branch is created directly in the catalog. Both GitHub accounts, permissions, bytes and target are checked again before writing. Game content, license texts and metadata become public. Do not submit secrets or content you cannot redistribute.\n\nFailures can leave a fork, branch or pull request; there is no automatic retry or cleanup. No merge, release, installation or activation. Independent catalog automation is not connected yet; a pull request alone is not publication. Send?",
-        "packages.submission_sent": "GitHub pull request created: {url}\nNot merged or released. Check GitHub before retrying; catalog publication automation is still pending.",
+        "packages.submission_sent": "GitHub pull request created: {url}\nCatalog automation validates and publishes accepted packages. This confirmation does not mean a release is already available.",
         "packages.submission_checked": "Submission preflight passed. Nothing uploaded; use the separate pull-request submission action to send. Catalog publication automation is still pending.",
         "packages.submission_summary": "Submission preflight for {repository}\nGame: {game}\nPackage: {package} {version}\nCurrent GitHub submitter: @{login} (ID {account_id})\nSHA-256: {sha256}\nPlanned catalog path: {path}\nArchive integrity, bounds, declared license/rights and publisher/account match checked. Other author/fork declarations are not authenticated. This check created no fork, pull request, upload or publication. Use the separate submission action to send. The catalog must independently validate the PR actor, exact files and immutable versions before publication.",
         "packages.catalog_source": "GitHub catalog: {repository} (repository ID {repository_id})",
@@ -180,6 +180,13 @@ STRINGS = {
         "function.identity_check_failed": "Function not saved: {error}. Check GitHub sign-in under Telegram/GitHub, or sign out locally to save without account attribution.",
         "function.saved": "Function saved.",
         "function.creator_account": "Creator: @{login} (GitHub ID {account_id})",
+        "function.account_attribution_compact": "Attribution · r{revision}",
+        "function.publish_version": "Publish new version...",
+        "function.publish_version_hint": "Save this Function, then check, pack and upload a new public version with your confirmation.",
+        "function.publication_check_failed": "Online version could not be checked: {error}",
+        "function.publication_no_longer_online": "This Function no longer has a matching public package. Refresh the catalog before publishing.",
+        "function.publish_upload_failed": "Upload failed: {error}\nThe prepared package remains in the package list. Check GitHub before retrying.",
+        "function.package_origin_compact": "GitHub package origin · r{revision}",
         "function.revision_account": "Revision {revision} by: @{login} (GitHub ID {account_id})",
         "function.account_attribution_notice": "Stored account attribution, not a live sign-in or proof of copyright.",
         "github.account": "GitHub account",
@@ -329,10 +336,16 @@ STRINGS = {
             "Debug Mode",
 
         "debug.mode_tooltip":
-            "Enable pacing and live observation for the running runtime. Off behaves exactly like production.",
+            "Observe and pace only the selected profile. Other profiles run normally.",
 
         "debug.active":
-            "Debug Mode is ON — the runtime is being observed and paced.",
+            "Debug Mode is ON — only the selected profile is observed and paced.",
+
+        "debug.profile":
+            "Debug profile",
+
+        "debug.choose_profile":
+            "Select a profile to observe",
 
         "debug.inactive":
             "Debug Mode is off. The runtime runs exactly like production.",
@@ -1497,13 +1510,22 @@ STRINGS = {
             "Profile change rejected. Review the conflict details.",
 
         "runtime.pause_complete":
-            "Runtime paused. No further automation commands will be sent until resumed.",
+            "Pause requested. Wait for Paused before using the emulator manually.",
 
         "runtime.paused":
             "Runtime Paused",
 
         "runtime.resume_complete":
-            "Runtime resumed.",
+            "Resume requested. Old work must finish; profile checks and Init will run again.",
+
+        "runtime.pause_all": "Pause all emulators",
+        "runtime.resume_all": "Resume all emulators (reinitialize)",
+        "runtime.pause_emulator": "Pause emulator {instance}",
+        "runtime.resume_emulator": "Resume emulator {instance} (reinitialize)",
+        "runtime.status_paused_prefix": "Paused emulators",
+        "runtime.state_paused": "Paused",
+        "runtime.state_pausing": "Pausing",
+        "runtime.state_resuming": "Resuming / reinitializing",
 
         "runtime.resume_short":
             "Resume",
@@ -2267,6 +2289,25 @@ STRINGS = {
 
         "settings.title":
             "Settings",
+
+        "settings.tab_general": "General",
+        "settings.tab_scheduling": "Scheduling",
+        "settings.tab_games": "Games",
+        "settings.scheduling_lookahead_seconds": "Minimum lookahead (seconds)",
+        "settings.scheduling_max_wait_minutes": "Maximum waiting time (minutes)",
+        "settings.use_global_scheduling": "Use global scheduling settings",
+        "settings.scheduling_help": "Global scheduling defaults apply to every game unless that game has explicit overrides. The active-time limit uses the existing profile time budget. Lookahead keeps near-future work on the current profile; maximum waiting time bounds how long ready work may wait.",
+        "settings.game_scheduling_help": "Inherited values follow the global controls immediately. Uncheck to edit this game's scheduling values. Game changes stay as drafts when switching games; Save persists all edited games and the global settings. Check again to remove this game's overrides on Save.",
+        "settings.operation_failed": "Could not load or save settings: {error}",
+        "settings.emulator_start_delay": "Emulator start delay (seconds)",
+        "settings.logging": "Logging",
+        "settings.log_level": "Log level",
+        "settings.max_log_file_size_mb": "Maximum log file size (MB)",
+        "settings.max_archive_files": "Maximum archive files",
+        "settings.startup_game": "Game",
+        "settings.startup_scheduler_tree": "Scheduler Tree",
+        "settings.startup_scheduler_timeline": "Scheduler Timeline",
+        "settings.startup_settings": "Settings",
 
         "settings.game":
             "Game",

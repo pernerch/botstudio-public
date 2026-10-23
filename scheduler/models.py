@@ -1158,6 +1158,7 @@ class SchedulerService:
         overdue_only: bool = False,
         priority_first: bool = False,
         cancellation_checker=None,
+        continuation_checker=None,
     ) -> list[dict]:
         if limit is not None and limit <= 0:
             return []
@@ -1194,6 +1195,10 @@ class SchedulerService:
         processed_event_ids = set()
         processed_queued_ids = set()
         while limit is None or len(results) < limit:
+            if cancellation_checker is not None and cancellation_checker():
+                break
+            if results and continuation_checker is not None and not continuation_checker():
+                break
             events = self.list_execution_events(
                 game_id,
                 profile_id=profile_id,

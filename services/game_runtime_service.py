@@ -75,7 +75,7 @@ class GameRuntimeService:
                     observed="mFocusedApp reports not responding",
                     package_name=package_name,
                     device_id=device_id,
-                    next_action="recovery level 2: restart game via monkey",
+                    next_action="recovery level 2: request game launcher and verify process",
                 )
 
                 return {
@@ -99,7 +99,7 @@ class GameRuntimeService:
                     hint="package is foreground but the process is gone",
                     package_name=package_name,
                     device_id=device_id,
-                    next_action="recovery level 2: restart game via monkey",
+                    next_action="recovery level 2: launch game and require Init for a new process",
                 )
 
                 return {
@@ -121,20 +121,82 @@ class GameRuntimeService:
             }
 
         self.logger.warning(
-            "Game Not Running",
+            "Game Not In Foreground",
             **self._metadata(profile),
             reason="foreground_mismatch",
             check="adb shell dumpsys window | mCurrentFocus",
             expected=package_name,
             observed=current_package,
             device_id=device_id,
-            next_action="recovery level 2: start game via monkey",
+            next_action="recovery level 2: bring game to foreground without force-stop",
         )
 
         return {
             "state": "Recovering",
-            "message": "Game not running",
+            "message": "Game not in foreground",
             "package_name": package_name,
+        }
+
+    def restore_game(self, profile, device_id: str, package_name: str) -> dict:
+        metadata = {
+            **self._metadata(profile),
+            "device_id": device_id,
+            "package_name": package_name,
+        }
+        try:
+            pid_before = self.adb.get_package_pid(device_id, package_name, strict=True)
+        except RuntimeError as error:
+            self.logger.error("Game Process Check Failed", **metadata, error=str(error))
+            return {"state": "Recovering", "message": "Game process check failed"}
+
+        accepted = self.start_game(profile, device_id, package_name)
+        try:
+            pid_after = self.adb.get_package_pid(device_id, package_name, strict=True)
+        except RuntimeError as error:
+            self.logger.error(
+                "Game Process Unverified",
+                **metadata,
+                pid_before=pid_before,
+                launch_accepted=accepted,
+                game_init_required=True,
+                error=str(error),
+                next_action="verify game health before running Init",
+            )
+            return {
+                "state": "Recovering",
+                "message": "Game process unverified; Init required",
+                "game_init_required": True,
+            }
+
+        foreground = self.adb.get_foreground_package(device_id)
+        init_required = pid_before is None or pid_after is None or pid_before != pid_after
+        metadata.update(
+            pid_before=pid_before,
+            pid_after=pid_after,
+            foreground_package=foreground,
+            launch_accepted=accepted,
+            game_init_required=init_required,
+        )
+        if not accepted:
+            self.logger.error("Game Foreground Request Failed", **metadata)
+            message = "Game foreground request failed"
+        elif pid_after is None:
+            self.logger.warning("Game Launch Pending", **metadata)
+            message = "Game launch pending; Init required"
+        elif pid_before is None or pid_before != pid_after:
+            action = "Started" if pid_before is None else "Changed"
+            self.logger.info(f"Game Process {action}", **metadata)
+            message = f"Game process {action.lower()}; Init required"
+        elif foreground == package_name:
+            self.logger.info("Game Foreground Restored", **metadata)
+            message = "Game foreground restored"
+        else:
+            self.logger.warning("Game Foreground Request Pending", **metadata)
+            message = "Game foreground request pending"
+        return {
+            "state": "Recovering",
+            "message": message,
+            "game_init_required": init_required,
         }
 
     def start_game(
@@ -145,7 +207,7 @@ class GameRuntimeService:
     ) -> bool:
 
         self.logger.info(
-            "Restart game",
+            "Game Launcher Requested",
             **self._metadata(profile),
             check="adb shell monkey -p <package> -c LAUNCHER 1",
             package_name=package_name,

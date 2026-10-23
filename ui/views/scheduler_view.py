@@ -643,17 +643,17 @@ class SchedulerView(QWidget):
         if self.isVisible():
             if QApplication.mouseButtons() != Qt.MouseButton.NoButton:
                 return
-            # focus gate: while the user edits in the field inspector, a tree
-            # refresh would rebuild the rows under their cursor; defer it and
-            # let the next tick/close resume the refresh cycle
-            focus_widget = QApplication.focusWidget()
-            if (
-                self.field_inspector.isVisible()
-                and focus_widget is not None
-                and self.field_inspector.isAncestorOf(focus_widget)
-            ):
+            if self._field_input_active():
                 return
             self.refresh()
+
+    def _field_input_active(self):
+        if QApplication.activeModalWidget() is not None or QApplication.activePopupWidget() is not None:
+            return True
+        focused = QApplication.focusWidget()
+        return self.field_inspector.isVisible() and focused is not None and (
+            focused is self.field_inspector or self.field_inspector.isAncestorOf(focused)
+        )
 
     def _restore_tree_column_widths(self):
         header = self.tree.header()
@@ -1350,6 +1350,18 @@ class SchedulerView(QWidget):
         self._refresh_task = None
         state = self._refresh_state
         self._refresh_state = None
+        # A worker may finish after the user has moved from the tree into an
+        # editor. Discard that snapshot; the next timer tick reads fresh data.
+        if self._field_input_active() or self._field_save_tasks:
+            self._refresh_pending = False
+            if error:
+                self.logger.error(
+                    "Scheduler View Refresh Failed",
+                    game=self.game_id,
+                    error=repr(error),
+                    next_action="keep active input and retry on next refresh",
+                )
+            return
         latest_state = (
             self._selected_kind(),
             self.tree.hasFocus(),
@@ -1359,7 +1371,7 @@ class SchedulerView(QWidget):
         if state:
             state = (
                 latest_state[0] or state[0],
-                latest_state[1] or state[1],
+                latest_state[1],
                 latest_state[2],
                 latest_state[3],
             )
@@ -1417,10 +1429,11 @@ class SchedulerView(QWidget):
                 QTimer.singleShot(0, self.refresh)
 
     def _refresh_open_field_inspector(self):
-        if not self.field_inspector.isVisible() or self._field_save_tasks:
-            return
-        focused = QApplication.focusWidget()
-        if focused is not None and self.field_inspector.isAncestorOf(focused):
+        if (
+            not self.field_inspector.isVisible()
+            or self._field_save_tasks
+            or self._field_input_active()
+        ):
             return
         item = self.tree.currentItem()
         if item is None or (item.data(0, Qt.UserRole) or {}) != self._inspector_scope:
@@ -3027,6 +3040,8 @@ class SchedulerView(QWidget):
             if event is None:
                 raise ValueError("event is no longer available")
             self.scheduler_service.queue_event_now(event)
+            if self._runtime_service is not None:
+                self._runtime_service.request_schedule(event.profile_id)
             self.logger.info(
                 "Event Run Queued",
                 game=self.game_id,

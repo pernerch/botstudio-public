@@ -1,7 +1,6 @@
 from PySide6.QtCore import Qt, Signal
 
 from PySide6.QtWidgets import (
-    QCheckBox,
     QComboBox,
     QAbstractItemView,
     QFormLayout,
@@ -26,6 +25,7 @@ from ui.i18n.translator import (
     t,
 )
 from ui.widgets.searchable_combo import SearchableComboBox
+from ui.widgets.toggle_switch import ToggleSwitch
 
 from services.profile_service import (
     ProfileGameFrozenError,
@@ -257,8 +257,9 @@ class ProfileView(QWidget):
         )
 
         self.enabled_checkbox = (
-            QCheckBox()
+            ToggleSwitch()
         )
+        self.enabled_checkbox.setAccessibleName(t("profile.enabled"))
 
         form.addRow(
             t(
@@ -422,7 +423,7 @@ class ProfileView(QWidget):
             self.on_changed
         )
 
-        self.enabled_checkbox.stateChanged.connect(
+        self.enabled_checkbox.toggled.connect(
             self.on_changed
         )
 

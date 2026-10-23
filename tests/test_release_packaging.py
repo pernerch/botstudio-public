@@ -50,6 +50,101 @@ class ApplicationIconTests(unittest.TestCase):
             with self.assertRaisesRegex(OSError, "taskbar identity"):
                 apply_taskbar_identity()
 
+    @unittest.skipUnless(sys.platform == "win32", "Windows shell API")
+    def test_window_taskbar_metadata_survives_reshow_and_fresh_windows(self):
+        from PySide6.QtWidgets import QWidget
+        from services.application_info import APP_NAME, STUDIO_APP_USER_MODEL_ID
+        from services.application_paths import ApplicationPaths
+        from ui.app_icon import load_app_icon
+        from ui.windows_taskbar import (
+            apply_window_taskbar_identity,
+            clear_window_taskbar_identity,
+            read_window_taskbar_identity,
+        )
+
+        if self.app.platformName() != "windows":
+            self.skipTest("Requires the native Windows Qt platform")
+        paths = ApplicationPaths.discover()
+        for _ in range(2):
+            with self.subTest(fresh_window=_):
+                window = QWidget()
+                window.setWindowIcon(load_app_icon())
+                hwnd = int(window.winId())
+                try:
+                    self.assertIsNone(read_window_taskbar_identity(hwnd)[3])
+                    apply_window_taskbar_identity(hwnd)
+                    expected = {
+                        2: subprocess.list2cmdline([sys.executable, str(paths.program_root / "main.py")]),
+                        3: f"{paths.resource('ui', 'botstudio.ico')},0",
+                        4: APP_NAME,
+                        5: STUDIO_APP_USER_MODEL_ID,
+                    }
+                    for _ in range(2):
+                        window.show()
+                        self.app.processEvents()
+                        self.assertEqual(expected, read_window_taskbar_identity(hwnd))
+                        window.hide()
+                    clear_window_taskbar_identity(hwnd)
+                    self.assertEqual(
+                        dict.fromkeys(expected), read_window_taskbar_identity(hwnd),
+                    )
+                finally:
+                    clear_window_taskbar_identity(hwnd)
+                    window.close()
+                    window.destroy()
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows shell API")
+    def test_frozen_taskbar_relaunch_uses_quoted_executable_without_python_script(self):
+        from PySide6.QtWidgets import QWidget
+        from ui.windows_taskbar import (
+            apply_window_taskbar_identity,
+            clear_window_taskbar_identity,
+            read_window_taskbar_identity,
+        )
+
+        if self.app.platformName() != "windows":
+            self.skipTest("Requires the native Windows Qt platform")
+        executable = r"C:\Program Files\BotStudio\BotStudio.exe"
+        window = QWidget()
+        hwnd = int(window.winId())
+        try:
+            with patch("sys.frozen", True, create=True), patch("sys.executable", executable):
+                from services.application_paths import ApplicationPaths
+
+                paths = ApplicationPaths.discover()
+                project = Path(__file__).resolve().parents[1]
+                paths = ApplicationPaths(paths.data_root, project, paths.program_root)
+                with patch("ui.windows_taskbar.ApplicationPaths.discover", return_value=paths):
+                    apply_window_taskbar_identity(hwnd)
+            self.assertEqual(
+                subprocess.list2cmdline([executable]),
+                read_window_taskbar_identity(hwnd)[2],
+            )
+        finally:
+            clear_window_taskbar_identity(hwnd)
+            window.close()
+            window.destroy()
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows shell API")
+    def test_window_property_store_failure_is_not_silenced(self):
+        from ui.windows_taskbar import apply_window_taskbar_identity
+
+        with patch("ctypes.windll.shell32.SHGetPropertyStoreForWindow", return_value=-1):
+            with self.assertRaisesRegex(OSError, "taskbar property store"):
+                apply_window_taskbar_identity(0)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows shell API")
+    def test_missing_taskbar_ico_is_an_explicit_error(self):
+        from services.application_paths import ApplicationPaths
+        from ui.windows_taskbar import apply_window_taskbar_identity
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = ApplicationPaths(root, root, root)
+            with patch("ui.windows_taskbar.ApplicationPaths.discover", return_value=paths):
+                with self.assertRaisesRegex(RuntimeError, "taskbar icon is missing"):
+                    apply_window_taskbar_identity(0)
+
 
 class ReleasePackagingTests(unittest.TestCase):
     def test_source_self_tests_use_isolated_data_and_real_offline_ocr(self):
@@ -80,6 +175,8 @@ class ReleasePackagingTests(unittest.TestCase):
                         self.assertTrue(report["exclusive_variable_inputs"])
                         if sys.platform == "win32":
                             self.assertEqual("BotStudio.Studio", report["taskbar_app_id"])
+                        self.assertNotIn("window_taskbar_app_id", report)
+                        self.assertNotIn("window_taskbar_icon", report)
                     else:
                         self.assertIn(str(project / "main.py"), report["startup_command"])
 

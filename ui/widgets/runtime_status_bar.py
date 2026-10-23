@@ -5,6 +5,7 @@ from PySide6.QtCore import Signal, QTimer
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
+    QMenu,
     QPushButton,
     QWidget,
 )
@@ -80,6 +81,9 @@ class RuntimeStatusBar(QWidget):
         self.btn_pause = QPushButton(
             t("runtime.pause_short")
         )
+        self.pause_menu = QMenu(self.btn_pause)
+        self.pause_menu.aboutToShow.connect(self._refresh_pause_menu)
+        self.btn_pause.setMenu(self.pause_menu)
 
         self.btn_stop = QPushButton(
             t("runtime.stop_short")
@@ -101,10 +105,6 @@ class RuntimeStatusBar(QWidget):
 
         self.btn_start.clicked.connect(
             self.start_clicked.emit
-        )
-
-        self.btn_pause.clicked.connect(
-            self.pause_runtime
         )
 
         self.btn_stop.clicked.connect(
@@ -137,17 +137,58 @@ class RuntimeStatusBar(QWidget):
 
     def pause_runtime(
         self,
+        instance=None,
+        paused=None,
     ):
 
-        if self.runtime_service.paused:
-            self.runtime_service.resume()
-        else:
-            self.runtime_service.pause()
+        if paused is None:
+            paused = not self.runtime_service.paused
+        try:
+            if paused:
+                self.runtime_service.pause(instance)
+            else:
+                self.runtime_service.resume(instance)
+        except (ValueError, RuntimeError) as error:
+            self.set_action_feedback(str(error))
+            return
         self._paused = self.runtime_service.paused
         self.set_action_feedback(
-            t("runtime.pause_complete") if self._paused else t("runtime.resume_complete"),
+            t("runtime.pause_complete") if paused else t("runtime.resume_complete"),
         )
         self.refresh()
+
+    def _refresh_pause_menu(self):
+        status = self.runtime_service.get_status()
+        pauses = status.get("paused_emulators", {})
+        self.pause_menu.clear()
+        for label, paused in (
+            ("runtime.pause_all", True), ("runtime.resume_all", False),
+        ):
+            action = self.pause_menu.addAction(t(label))
+            action.triggered.connect(
+                lambda _checked=False, value=paused: self.pause_runtime(paused=value)
+            )
+        self.pause_menu.addSeparator()
+        instances = {
+            str(profile["emulator_instance"])
+            for profile in status.get("profiles", [])
+            if profile.get("emulator_instance") is not None
+        } | set(pauses)
+        for instance in sorted(
+            instances,
+            key=lambda value: (0, int(value)) if value.isascii() and value.isdigit() else (1, value),
+        ):
+            pause = pauses.get(instance)
+            blocked = pause is not None or status.get("pause_all", False)
+            label = t("runtime.resume_emulator" if blocked else "runtime.pause_emulator").format(
+                instance=instance,
+            )
+            action = self.pause_menu.addAction(label)
+            action.setEnabled(not pause or pause["state"] != "resuming")
+            action.triggered.connect(
+                lambda _checked=False, target=instance, value=not blocked:
+                self.pause_runtime(instance=target, paused=value)
+            )
 
     def set_action_feedback(self, message):
         self.lbl_action.setText(message)
@@ -158,9 +199,13 @@ class RuntimeStatusBar(QWidget):
     ):
 
         status = self.runtime_service.get_status()
-        self._paused = self.runtime_service.paused
+        self._paused = self.runtime_service.paused or bool(status.get("paused_emulators"))
         self.btn_pause.setEnabled(self.runtime_service.running)
-        self.btn_pause.setText(t("runtime.resume_short") if self._paused else t("runtime.pause_short"))
+        pause_count = len(status.get("paused_emulators", {}))
+        self.btn_pause.setText(
+            f"{t('runtime.pause_short')} ({pause_count})" if pause_count else t("runtime.pause_short")
+        )
+        self.btn_pause.setToolTip(f"{t('runtime.status_paused_prefix')}: {pause_count}")
         if not self.runtime_service.running:
             self._paused = False
         profiles = []

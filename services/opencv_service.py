@@ -5,6 +5,8 @@ import random
 import cv2
 import numpy as np
 
+from services.vision_cpu_budget import configure_vision_cpu_budget
+
 
 @dataclass
 class DetectionResult:
@@ -23,6 +25,9 @@ class DetectionResult:
 class OpenCVService:
 
     DEFAULT_THRESHOLD = 0.80
+
+    def __init__(self):
+        configure_vision_cpu_budget()
 
     def find_best(
         self,

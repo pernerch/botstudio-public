@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QSplitter,
     QFrame,
@@ -154,6 +155,39 @@ class _EventChoiceTask(QRunnable):
 
 class _FunctionSaveSignals(QObject):
     finished = Signal(object, object)
+
+
+class _FunctionPublicationSignals(QObject):
+    finished = Signal(object, object, str)
+
+
+class _FunctionPublicationTask(QRunnable):
+    def __init__(self, key, function, game_service, function_service, library_service, variable_service):
+        super().__init__()
+        self.key = key
+        self.function = deepcopy(function)
+        self.game_service = game_service
+        self.function_service = function_service
+        self.library_service = library_service
+        self.variable_service = variable_service
+        self.signals = _FunctionPublicationSignals()
+
+    def run(self):
+        from services.github_catalog_service import GitHubCatalogService
+        from services.package_service import PackageService
+
+        try:
+            packages = PackageService(
+                function_root=str(self.function_service.root),
+                game_service=self.game_service,
+                library_service=self.library_service,
+                variable_service=self.variable_service,
+            )
+            publication = GitHubCatalogService().function_publication(self.function, packages)
+        except Exception as error:
+            self.signals.finished.emit(self, None, str(error) or type(error).__name__)
+        else:
+            self.signals.finished.emit(self, publication, "")
 
 
 class _FunctionSaveTask(QRunnable):
@@ -756,6 +790,7 @@ class FunctionCanvas(QGraphicsView):
         if block.block_type in (
             "ocr_read",
             BLOCK_SEARCH_OCR,
+            BLOCK_SEARCH_OCR_TAP,
             BLOCK_SWIPE_SEARCH,
             BLOCK_FIND_ELEMENT,
             "find_color_trigger",
@@ -1545,6 +1580,9 @@ class FunctionEditorView(QWidget):
         self.github_auth = GitHubAuthService()
         self._save_task = None
         self._save_callback = None
+        self._publication_task = None
+        self._publication_key = None
+        self._publication = None
         self.logger = get_logger("function")
         self.current_function = None
         self.selected_block = None
@@ -1699,10 +1737,15 @@ class FunctionEditorView(QWidget):
         details_layout.addWidget(self.details)
         self.package_origin_label = QLabel()
         self.package_origin_label.setTextFormat(Qt.PlainText)
-        self.package_origin_label.setWordWrap(True)
+        self.package_origin_label.setWordWrap(False)
+        origin_font = self.package_origin_label.font()
+        if origin_font.pointSizeF() > 0:
+            origin_font.setPointSizeF(max(8.0, origin_font.pointSizeF() - 1.0))
+        self.package_origin_label.setFont(origin_font)
+        self.package_origin_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.package_origin_label.setStyleSheet("color: #AAB4C4;")
         self.package_origin_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         details_layout.addWidget(self.package_origin_label)
-        details_layout.addStretch()
 
         bottom = QWidget()
         bottom_layout = QHBoxLayout(bottom)
@@ -1714,7 +1757,20 @@ class FunctionEditorView(QWidget):
         center_layout.addWidget(bottom, stretch=2)
 
         right = QWidget()
-        right_layout = QVBoxLayout(right)
+        sidebar_layout = QVBoxLayout(right)
+        controls = QWidget()
+        right_layout = QVBoxLayout(controls)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        self.sidebar_controls_scroll = QScrollArea()
+        self.sidebar_controls_scroll.setWidget(controls)
+        self.sidebar_controls_scroll.setWidgetResizable(True)
+        self.sidebar_controls_scroll.setFrameShape(QFrame.NoFrame)
+        self.sidebar_controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.sidebar_controls_scroll.setMinimumHeight(self.fontMetrics().lineSpacing() * 4)
+        self.sidebar_splitter = QSplitter(Qt.Vertical)
+        self.sidebar_splitter.setChildrenCollapsible(False)
+        self.sidebar_splitter.addWidget(self.sidebar_controls_scroll)
+        sidebar_layout.addWidget(self.sidebar_splitter)
         right_layout.addWidget(self.function_name)
         right_layout.addWidget(QLabel(t("function.block_error")))
         right_layout.addWidget(self.block_status_scroll)
@@ -1729,12 +1785,25 @@ class FunctionEditorView(QWidget):
         right_layout.addWidget(details_panel)
         right_layout.addWidget(self.btn_save)
         right_layout.addWidget(self.btn_save_copy)
+        self.btn_publish_version = QPushButton(t("function.publish_version"))
+        self.btn_publish_version.setToolTip(t("function.publish_version_hint"))
+        self.btn_publish_version.hide()
+        self.btn_publish_version.clicked.connect(self._publish_function_version)
+        right_layout.addWidget(self.btn_publish_version)
+        self.publication_status = QLabel()
+        self.publication_status.setTextFormat(Qt.PlainText)
+        self.publication_status.setWordWrap(True)
+        self.publication_status.hide()
+        right_layout.addWidget(self.publication_status)
         self.btn_delete_function = QPushButton("Delete function")
         right_layout.addWidget(self.btn_delete_function)
         separator = QFrame()
         separator.setFrameShape(QFrame.HLine)
         separator.setFrameShadow(QFrame.Sunken)
         right_layout.addWidget(separator)
+        preview = QWidget()
+        preview_layout = QVBoxLayout(preview)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
         self.btn_capture = QPushButton(t("function.capture_screen"))
         self.live_image = ClickableImage(
             t("function.no_live_image")
@@ -1744,8 +1813,18 @@ class FunctionEditorView(QWidget):
         self.live_scroll.setWidgetResizable(False)
         self.live_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.live_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        right_layout.addWidget(self.btn_capture)
-        right_layout.addWidget(self.live_scroll, stretch=1)
+        self.live_scroll.setMinimumHeight(
+            self.fontMetrics().lineSpacing() * 10
+            + self.live_scroll.horizontalScrollBar().sizeHint().height()
+            + self.live_scroll.frameWidth() * 2
+        )
+        preview_layout.addWidget(self.btn_capture)
+        preview_layout.addWidget(self.live_scroll, stretch=1)
+        self.sidebar_splitter.addWidget(preview)
+        self.sidebar_splitter.setStretchFactor(0, 1)
+        self.sidebar_splitter.setStretchFactor(1, 1)
+        line_height = self.fontMetrics().lineSpacing()
+        self.sidebar_splitter.setSizes([line_height * 24, line_height * 18])
 
         splitter.addWidget(left)
         splitter.addWidget(center)
@@ -2987,6 +3066,7 @@ class FunctionEditorView(QWidget):
     def _refresh_details(self):
         try:
             self._refresh_package_origin()
+            self._refresh_function_publication()
             block = self.selected_block
             if not block:
                 self.block_label.setText("-")
@@ -3010,6 +3090,78 @@ class FunctionEditorView(QWidget):
                 t("function.editor_error")
             )
 
+    def _refresh_function_publication(self):
+        function = self.current_function
+        key = (
+            (id(function), function.game_id, function.function_id, function.revision)
+            if function is not None and function.saved else None
+        )
+        if key == self._publication_key:
+            return
+        self._publication_key = key
+        self._publication = None
+        self.btn_publish_version.hide()
+        self.publication_status.hide()
+        if key is None or self._publication_task is not None:
+            return
+        self._start_function_publication_check()
+
+    def _start_function_publication_check(self):
+        self._publication_task = _FunctionPublicationTask(
+            self._publication_key, self.current_function, self.game_service,
+            self.function_service, self.library_service, self.variable_service,
+        )
+        self._publication_task.signals.finished.connect(self._function_publication_checked)
+        QThreadPool.globalInstance().start(self._publication_task)
+
+    def _function_publication_checked(self, task, publication, error):
+        self._publication_task = None
+        if task.key != self._publication_key:
+            if self._publication_key is not None:
+                self._start_function_publication_check()
+            return
+        if error:
+            self.publication_status.setText(t("function.publication_check_failed").format(error=error))
+            self.publication_status.show()
+            self.logger.warning(
+                "Function Publication Check Failed", error=error,
+                next_action="check GitHub sign-in and reopen the Function to retry",
+            )
+            return
+        self._publication = publication
+        self.btn_publish_version.setVisible(publication is not None)
+
+    def _publish_function_version(self):
+        if self._publication is None or self._save_task is not None:
+            return
+        function = self.current_function
+        if function is None:
+            return
+        self.save_function(on_finished=lambda success: self._open_function_publication(success))
+
+    def _open_function_publication(self, saved):
+        if not saved:
+            return
+        from services.package_service import PackageService
+        from ui.widgets.package_preparation_dialog import PackagePreparationDialog
+
+        function = self.current_function
+        dialog = PackagePreparationDialog(
+            self, game_id=function.game_id, simple_flow=True,
+            package_service=PackageService(
+                function_root=str(self.function_service.root),
+                game_service=self.game_service,
+                library_service=self.library_service,
+                variable_service=self.variable_service,
+            ),
+            source_id=function.function_id,
+            source_kind="helper" if function.kind == FUNCTION_KIND_HELPER else "function",
+            publish_after_pack=True,
+        )
+        dialog.exec()
+        self._publication_key = None
+        self._refresh_function_publication()
+
     def _refresh_package_origin(self):
         function = self.current_function
         origins = function.package_origins if function else []
@@ -3026,6 +3178,7 @@ class FunctionEditorView(QWidget):
         self.package_origin_label.setVisible(bool(origins or accounts))
         if not origins and not accounts:
             self.package_origin_label.clear()
+            self.package_origin_label.setToolTip("")
             return
         lines = accounts + ([t("function.account_attribution_notice")] if accounts else [])
         if origins:
@@ -3042,7 +3195,9 @@ class FunctionEditorView(QWidget):
             )
             for origin in origins
         )
-        self.package_origin_label.setText("\n".join(lines))
+        summary_key = "function.package_origin_compact" if origins else "function.account_attribution_compact"
+        self.package_origin_label.setText(t(summary_key).format(revision=function.revision))
+        self.package_origin_label.setToolTip("\n".join(lines))
 
     def _clear_parameter_controls(self):
 
@@ -4465,7 +4620,10 @@ class FunctionEditorView(QWidget):
             return
 
         if block.block_type in (BLOCK_SEARCH_OCR, BLOCK_SEARCH_OCR_TAP):
-            region = block.params.get("region")
+            region = resolve_ocr_region(
+                {"region": block.params.get("region")},
+                self._coordinate_preview_anchor(block),
+            )
             if (
                 isinstance(region, dict)
                 and int(region.get("width", 0)) > 0
@@ -4729,6 +4887,8 @@ class FunctionEditorView(QWidget):
             ),
             None,
         )
+        if source and source.block_type == BLOCK_COORDINATE_ANCHOR:
+            return dict(source.params)
         source_entry_id = source.params.get("library_entry_id", "") if source else ""
         source_entry = self.library_service.load(source_entry_id) if source_entry_id else None
         pattern = source_entry.get("pattern", {}) if source_entry else {}

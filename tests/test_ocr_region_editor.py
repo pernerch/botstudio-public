@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from copy import deepcopy
 from threading import Timer
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -18,10 +18,11 @@ from PySide6.QtWidgets import QApplication, QFormLayout, QLabel, QSpinBox, QWidg
 from models.bot_function import BotFunction
 from models.execution_context import ExecutionContext
 from models.function_block import FunctionBlock
+from models.function_connection import FunctionConnection
 from services.function_block_catalog import BLOCK_CATALOG, BLOCK_OCR_READ
 from services.function_runner import FunctionRunner
 from services.function_service import FunctionService
-from ui.views.function_editor_view import FunctionEditorView, ClickableImage
+from ui.views.function_editor_view import FunctionCanvas, FunctionEditorView, ClickableImage
 
 
 class OcrRegionEditorTests(unittest.TestCase):
@@ -259,6 +260,90 @@ class OcrRegionEditorTests(unittest.TestCase):
         self.assertEqual(57, self.block.params["offset_x"])
         self.assertEqual(10, self.block.params["offset_y"])
         self.assertEqual(800, self.block.params["region"]["screen_width"])
+
+    def test_search_ocr_blocks_expose_coordinate_input_and_preview_incoming_region(self):
+        region = {"x": 100, "y": 200, "width": 80, "height": 30}
+        for block_type in ("search_ocr", "search_ocr_tap"):
+            with self.subTest(block_type=block_type):
+                self.view._last_runtime_coordinates[self.block.block_id] = region
+                overlay = self.overlay_for(block_type, region=None, offset_x=5, offset_y=7)
+                self.assertEqual(["input", "coordinates"], FunctionCanvas.input_ports(self.block))
+                self.assertEqual(region, {key: overlay[key] for key in region})
+                if block_type == "search_ocr_tap":
+                    self.assertEqual((145, 222), (overlay["tap_x"], overlay["tap_y"]))
+
+    def test_search_ocr_without_wire_keeps_whole_screen_search(self):
+        runner = FunctionRunner(screen_service=Mock(), ocr_service=Mock(), logger=Mock())
+        runner.screen_service.capture.return_value = "isolated.png"
+        runner.ocr_service.find_text.return_value = None
+        for block_type in ("search_ocr", "search_ocr_tap"):
+            block = FunctionBlock.create(block_type=block_type, params={"query": "missing"})
+            outcome, value, error = runner.run_block(
+                block, ExecutionContext(profile_id="test", function_id="test"),
+                {"device_id": "isolated"},
+            )
+            self.assertEqual(("not_found", None, None), (outcome, value, error))
+            self.assertIsNone(runner.ocr_service.find_text.call_args.args[2])
+
+    def test_coordinate_anchor_preview_uses_wired_rectangle_before_debug_run(self):
+        anchor = FunctionBlock.create(block_type="coordinate_anchor", params={
+            "x": 100, "y": 200, "width": 80, "height": 30,
+        })
+        self.block.block_type = "search_ocr"
+        self.block.params = {"region": None, "query": "Target"}
+        self.view.current_function = BotFunction.create(name="Test", game_id="test", author="test")
+        self.view.current_function.blocks = [anchor, self.block]
+        self.view.current_function.connections = [FunctionConnection(
+            source_block_id=anchor.block_id, source_outcome="coordinates",
+            target_block_id=self.block.block_id, target_input="coordinates",
+        )]
+        self.view._refresh_live_ocr_overlay()
+        self.assertEqual(anchor.params, self.view.live_image.overlay_region)
+
+    def test_search_ocr_coordinate_wire_executes_source_and_limits_search_and_tap(self):
+        for block_type in ("search_ocr", "search_ocr_tap"):
+            for explicit in (None, {"x": 2, "y": 4, "width": 60, "height": 20}):
+                with self.subTest(block_type=block_type, explicit=explicit):
+                    anchor = FunctionBlock.create(block_type="coordinate_anchor", params={
+                        "x": 100, "y": 200, "width": 80, "height": 30,
+                        "screen_width": 800, "screen_height": 600,
+                    })
+                    target = FunctionBlock.create(block_type=block_type, params={
+                        "query": "Target", "region": explicit, "offset_x": 5,
+                        "offset_y": 7, "tap_delay_ms": 0,
+                    })
+                    function = BotFunction.create(name="OCR search", game_id="test", author="test")
+                    function.blocks = [anchor, target]
+                    function.connections = [FunctionConnection(
+                        source_block_id=anchor.block_id, source_outcome="coordinates",
+                        target_block_id=target.block_id, target_input="coordinates",
+                    )]
+                    runner = FunctionRunner(
+                        screen_service=Mock(), ocr_service=Mock(), adb_service=Mock(), logger=Mock(),
+                    )
+                    runner.screen_service.capture.return_value = "isolated.png"
+                    runner.ocr_service.find_text.return_value = {
+                        "x": 110, "y": 205, "width": 40, "height": 10,
+                    }
+                    context = ExecutionContext(profile_id="test", function_id=function.function_id)
+                    with patch("services.function_runner.Emulator") as emulator:
+                        emulator.return_value.tap.return_value = True
+                        outcome, value, error = runner._run_debug_operation(
+                            function, target, context, {"device_id": "isolated"}, set(),
+                        )
+                    self.assertIsNone(error)
+                    self.assertEqual("ok" if block_type == "search_ocr_tap" else "found", outcome)
+                    expected_region = explicit or anchor.params
+                    actual_region = runner.ocr_service.find_text.call_args.args[2]
+                    self.assertEqual(
+                        {key: expected_region[key] for key in actual_region},
+                        actual_region,
+                    )
+                    if block_type == "search_ocr_tap":
+                        emulator.return_value.tap.assert_called_once_with(135, 217)
+                    else:
+                        emulator.return_value.tap.assert_not_called()
+                    self.assertEqual(explicit, target.params["region"])
 
     def test_explicit_region_survives_real_function_save_and_reload(self):
         self.block.params["library_entry_id"] = ""

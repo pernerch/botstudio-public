@@ -16,6 +16,7 @@ class WatchdogEmulatorTests(unittest.TestCase):
         self.runtime._start_lock = threading.Lock()
         self.runtime._stop_generation = 0
         self.runtime.running = True
+        self.runtime.get_status.return_value = {"paused_emulators": {}}
         self.runtime.profile_service.load_enabled.return_value = [
             {"id": "profile-1", "game": "game", "emulator_instance": 0}
         ]
@@ -59,6 +60,13 @@ class WatchdogEmulatorTests(unittest.TestCase):
         result = self.service.handle("emulator.restart", {"instance": 0})
         self.assertFalse(result["runtime_resumed"])
         self.runtime._start.assert_not_called()
+
+    def test_maintenance_cannot_silently_reactivate_paused_emulators(self):
+        self.runtime.get_status.return_value = {"paused_emulators": {"0": {"state": "paused"}}}
+        with self.assertRaisesRegex(RuntimeError, "Resume paused emulators"):
+            self.service.handle("emulator.restart", {"instance": 0})
+        self.runtime.stop.assert_not_called()
+        self.runtime.emulator_manager.stop_instance.assert_not_called()
 
     def test_stop_timeout_leaves_emulator_unchanged(self):
         self.runtime.heartbeat.wait_until_idle.return_value = False
@@ -151,7 +159,10 @@ class WatchdogEmulatorTests(unittest.TestCase):
         self.runtime.emulator_manager.is_instance_running.side_effect = None
         self.runtime.emulator_manager.is_instance_running.return_value = True
         result = self.service.handle("emulators.list", {})
-        self.assertEqual([{"instance": 0, "running": True}], result["emulators"])
+        self.assertEqual(
+            [{"instance": 0, "running": True, "automation": "enabled", "pause_error": None}],
+            result["emulators"],
+        )
         self.runtime.stop.assert_not_called()
 
     def test_heartbeat_wait_tracks_active_callback_and_cancelled_timer(self):

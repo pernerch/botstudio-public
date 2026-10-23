@@ -28,46 +28,50 @@ def build_timeline_items(
     window_end = current + timedelta(hours=horizon_hours)
     items: list[TimelineItem] = []
     for event in events:
+        if not event.enabled:
+            continue
         is_init = bool(event.is_init)
+        observed_only = is_init or event.is_interrupt
         start = (
             event._parse_datetime(event.last_started_at)
-            if event.status == "running" or is_init
+            if event.status == "running" or observed_only
             else event._parse_datetime(event.next_due_at)
         )
         if start is None:
             continue
-        duration = event.average_duration_seconds or 15 * 60
-        end = start + timedelta(seconds=duration)
-        if event.status == "running":
-            end = max(current, end)
-        elif is_init:
-            finished = event._parse_datetime(event.last_finished_at)
-            if finished is not None:
-                end = finished
-        if end < window_start or start > window_end:
-            continue
         task_start = start
-        tasks = [
-            task
-            for task in event.ordered_tasks()
-            if task.active
-            and (not is_init or task.last_started_at)
-        ]
-        if not tasks:
-            tasks = [
-                task
-                for task in event.ordered_tasks()
-                if not is_init or task.last_started_at
-            ]
-        for task in tasks:
-            task_started = event._parse_datetime(task.last_started_at) if is_init else None
-            task_finished = event._parse_datetime(task.last_finished_at) if is_init else None
+        for task in event.ordered_tasks():
+            if not task.active:
+                continue
+            task_started = (
+                event._parse_datetime(task.last_started_at)
+                if observed_only or event.status == "running" else None
+            )
+            if task_started is not None and task_started < start:
+                task_started = None
+            if observed_only and task_started is None:
+                continue
+            task_finished = (
+                event._parse_datetime(task.last_finished_at)
+                if task_started is not None else None
+            )
+            if (
+                task_started is not None
+                and task_finished is not None
+                and task_finished < task_started
+            ):
+                task_finished = None
             if task_started is not None:
                 task_start = task_started
             duration = task.average_duration_seconds or event.average_duration_seconds
             duration = duration or 15 * 60
             task_end = task_finished or task_start + timedelta(seconds=duration)
-            if event.status == "running" and task.status == "running":
+            running = (
+                event.status == "running"
+                and task.status == "running"
+                and task_started is not None
+            )
+            if running:
                 task_end = max(current, task_end)
             if task_end >= window_start and task_start <= window_end:
                 label = task.name or event.name or event.event_id
@@ -82,12 +86,12 @@ def build_timeline_items(
                         end=task_end,
                         status=(
                             "running"
-                            if task.status == "running"
-                            else event.status if is_init else "planned"
+                            if running
+                            else task.status if task_started is not None else "planned"
                         ),
                     )
                 )
-            if not is_init:
+            if not observed_only:
                 task_start = task_end
     return assign_lanes(items), window_start, window_end
 

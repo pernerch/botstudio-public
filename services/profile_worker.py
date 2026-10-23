@@ -54,9 +54,14 @@ class ProfileWorker:
             return False
 
         self.stop_event.clear()
+        from services.debug_pacing_service import DebugEventHub, DebugPacingService
+
         self.process = Process(
             target=self._run,
-            args=(function_id, block_id, dict(debug_values or {})),
+            args=(
+                function_id, block_id, dict(debug_values or {}),
+                DebugPacingService.instance(), DebugEventHub.instance(),
+            ),
             name=f"BotStudioProfile-{self.profile_id}",
             daemon=True,
         )
@@ -92,7 +97,15 @@ class ProfileWorker:
         function_id: str,
         block_id: str | None = None,
         debug_values: dict | None = None,
+        debug_pacing=None,
+        debug_hub=None,
     ):
+        from services.debug_pacing_service import DebugEventHub, DebugPacingService
+
+        if debug_pacing is not None:
+            DebugPacingService._instance = debug_pacing
+        if debug_hub is not None:
+            DebugEventHub._instance = debug_hub
 
         function_service = FunctionService(
             root=self.function_root
@@ -118,6 +131,7 @@ class ProfileWorker:
             function_id=function.function_id,
             variable_service=VariableService(),
             transient_variable_names=set(debug_values or {}),
+            cancellation_checker=self.stop_event.is_set,
             event_due_handler=partial(
                 SchedulerService().set_event_due,
                 self.profile.get("game", ""), self.profile_id,
@@ -150,29 +164,6 @@ class ProfileWorker:
             library_service=LibraryService(),
             function_service=function_service,
         )
-
-        # live block events for the debug screen (variables snapshot included)
-        from services.debug_pacing_service import DebugEventHub, DebugPacingService
-
-        def _block_observer(block, ctx):
-            DebugEventHub.instance().publish({
-                "event": "block_started",
-                "execution_id": ctx.execution_id,
-                "profile_id": self.profile_id,
-                "function_id": ctx.function_id,
-                "block_id": block.block_id,
-                "block_type": block.block_type,
-                "variables": ctx.snapshot(),
-            })
-
-        if DebugPacingService.instance().enabled:
-            runner.block_observer = _block_observer
-            DebugEventHub.instance().publish({
-                "event": "function_started",
-                "execution_id": context.execution_id,
-                "profile_id": self.profile_id,
-                "function_id": function.function_id,
-            })
 
         if self.stop_event.is_set():
             context.cancelled = True

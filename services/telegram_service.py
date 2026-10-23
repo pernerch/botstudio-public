@@ -76,6 +76,7 @@ class TelegramService:
         "help": "❓", "studio_start": "▶️", "runtime_start": "▶️",
         "studio_stop": "⏹️", "runtime_stop": "⏹️", "studio_restart": "🔄",
         "emulator_restart": "🔄", "operation": "🔎", "menu_event": "📅",
+        "runtime_pause": "⏸️", "runtime_resume": "▶️",
         "event_on": "✅", "event_off": "⛔", "event_run": "⚡",
         "info": "📸", "statistics": "📊",
     }
@@ -88,7 +89,7 @@ class TelegramService:
     )
     CONFIRM_COMMANDS = {
         "studio_start", "studio_stop", "studio_restart",
-        "runtime_start", "runtime_stop", "emulator_restart",
+        "runtime_start", "runtime_stop", "runtime_pause", "runtime_resume", "emulator_restart",
         "event_on", "event_off", "event_run",
     }
 

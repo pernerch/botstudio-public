@@ -10,6 +10,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QHBoxLayout,
+    QComboBox,
     QLabel,
     QPushButton,
     QSlider,
@@ -22,7 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from services.debug_pacing_service import DebugPacingService
-from services.function_service import FunctionService
+from models.bot_function import BotFunction
 from services.logging_service import get_logger
 from ui.i18n.translator import t
 from ui.views.function_editor_view import FunctionCanvas
@@ -31,7 +32,7 @@ from ui.widgets.toggle_switch import ToggleSwitch
 
 
 class DebugView(QWidget):
-    """Runtime observation screen with a global Debug Mode switch."""
+    """Observe and pace one explicitly selected Runtime profile."""
 
     def __init__(self, runtime_service=None, parent=None):
         super().__init__(parent)
@@ -55,6 +56,15 @@ class DebugView(QWidget):
         self.status_label = QLabel(t("debug.inactive"))
         self.status_label.setStyleSheet("color: #AAB4C4; padding: 4px;")
         layout.addWidget(self.status_label)
+
+        profile_row = QHBoxLayout()
+        profile_row.addWidget(QLabel(t("debug.profile")))
+        self.profile_combo = QComboBox()
+        self.profile_combo.addItem(t("debug.choose_profile"), "")
+        self.profile_combo.currentIndexChanged.connect(self._on_profile_changed)
+        profile_row.addWidget(self.profile_combo, stretch=1)
+        layout.addLayout(profile_row)
+        self._profile_choices = ()
 
         controls = QHBoxLayout()
         controls.addWidget(QLabel(t("debug.speed")))
@@ -125,20 +135,28 @@ class DebugView(QWidget):
 
         self._active_execution_id = None
         self._active_function_id = None
+        self._active_block_id = None
+        self._functions = {}
+        self.log_view.document().setMaximumBlockCount(500)
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(200)
         self._poll_timer.timeout.connect(self._poll_block_events)
         self._poll_timer.start()
+        self._refresh_profiles()
 
         layout.addStretch(0)
 
     def _on_debug_toggled(self, checked: bool):
         AppHeaderBar.set_debug_active(checked)
         pacing = DebugPacingService.instance()
+        if checked:
+            pacing.select_profile(self.profile_combo.currentData())
+            pacing.set_factor(self.speed_slider.value())
         pacing.set_enabled(checked)
         pacing.resume()
-        self.speed_slider.setEnabled(checked)
-        self.pause_button.setEnabled(checked)
+        selected = bool(self.profile_combo.currentData())
+        self.speed_slider.setEnabled(checked and selected)
+        self.pause_button.setEnabled(checked and selected)
         self.pause_button.setText(t("debug.pause"))
         self.status_label.setText(
             t("debug.active") if checked else t("debug.inactive")
@@ -147,6 +165,52 @@ class DebugView(QWidget):
             "Debug Mode Toggled",
             active=checked,
         )
+
+    def _refresh_profiles(self):
+        if self.runtime_service is None:
+            return
+        snapshot = self.runtime_service.get_status()
+        statuses = snapshot.get("debug_profiles", snapshot.get("profiles", []))
+        choices = tuple(sorted({
+            (
+                str(status.get("profile_id") or ""),
+                f"{status.get('profile_name') or status.get('profile_id')} "
+                f"({t('profile.emulator')} {status.get('emulator_instance')})",
+            )
+            for status in statuses if status.get("profile_id")
+        }))
+        if choices == self._profile_choices:
+            return
+        self._profile_choices = choices
+        selected = self.profile_combo.currentData()
+        self.profile_combo.blockSignals(True)
+        self.profile_combo.clear()
+        self.profile_combo.addItem(t("debug.choose_profile"), "")
+        for profile_id, label in choices:
+            self.profile_combo.addItem(label, profile_id)
+        self.profile_combo.setCurrentIndex(max(0, self.profile_combo.findData(selected)))
+        self.profile_combo.blockSignals(False)
+        if self.profile_combo.currentData() != selected:
+            self._on_profile_changed()
+
+    def _on_profile_changed(self, *_):
+        pacing = DebugPacingService.instance()
+        pacing.select_profile(self.profile_combo.currentData())
+        self._active_execution_id = None
+        self._active_function_id = None
+        self._active_block_id = None
+        self._functions.clear()
+        self.canvas.draw_blocks([], [])
+        self.function_headline.clear()
+        self.variables_table.setRowCount(0)
+        self.log_view.clear()
+        enabled = pacing.enabled and bool(self.profile_combo.currentData())
+        self.speed_slider.setEnabled(enabled)
+        self.pause_button.setEnabled(enabled)
+        self.pause_button.setText(t("debug.pause"))
+        self.editor_button.setEnabled(False)
+        self.freeze_button.setEnabled(False)
+        self.freeze_button.setChecked(False)
 
     def _on_speed_changed(self, value: int):
         self.speed_value_label.setText(f"{value}×")
@@ -164,36 +228,45 @@ class DebugView(QWidget):
     def _poll_block_events(self):
         """Pull block_started events from the global hub and paint the state."""
 
+        from services.debug_pacing_service import DebugEventHub
+
+        self._refresh_profiles()
+        events = DebugEventHub.poll_existing()
         if not DebugPacingService.instance().enabled:
             return
 
-        from services.debug_pacing_service import DebugEventHub
-
-        for event in DebugEventHub.instance().poll():
+        for event in events:
+            if event.get("profile_id") != self.profile_combo.currentData():
+                continue
+            if event.get("debug_generation") != DebugPacingService.instance().observation_generation(
+                self.profile_combo.currentData()
+            ):
+                continue
             if event.get("event") == "function_started":
+                definition = event.get("function")
+                if isinstance(definition, dict):
+                    self._functions[event.get("function_id")] = BotFunction.from_dict(definition)
                 self._active_execution_id = event.get("execution_id")
                 self._active_function_id = event.get("function_id")
                 self._load_function_canvas(event.get("function_id"))
             elif event.get("event") == "block_started":
+                self._active_execution_id = event.get("execution_id")
                 function_id = event.get("function_id")
                 if function_id and function_id != self._active_function_id:
                     # the canvas follows whichever function the scheduler runs
                     self._active_function_id = function_id
                     self._load_function_canvas(function_id)
-                # a call_function step shows the helper's canvas instead
-                if event.get("block_type") == "call_function":
-                    helper_id = self._called_helper_id(event.get("block_id"))
-                    if helper_id and helper_id != self._active_function_id:
-                        self._active_function_id = helper_id
-                        self._load_function_canvas(helper_id)
                 self._highlight_block(event.get("block_id"))
+                self._active_block_id = event.get("block_id")
                 self._render_variables(event.get("variables") or {})
                 self._append_log(event)
             elif event.get("event") in ("function_finished", "function_failed"):
+                if event.get("execution_id") == self._active_execution_id:
+                    self._render_variables(event.get("variables") or {})
                 self._append_log(event)
 
     def _load_function_canvas(self, function_id):
-        """Load the function fresh from disk so edits show on the next run."""
+        """Display the exact executing definition without disk I/O on the GUI."""
 
         function = self._find_function(function_id)
         if not function:
@@ -207,27 +280,7 @@ class DebugView(QWidget):
         self.freeze_button.setEnabled(True)
 
     def _find_function(self, function_id):
-        service = FunctionService()
-        for game_dir in service.root.iterdir() if service.root.exists() else []:
-            if game_dir.is_dir():
-                found = service.load(game_dir.name, function_id)
-                if found:
-                    return found
-        return None
-
-    def _called_helper_id(self, block_id):
-        """Resolve which helper a call_function block points at."""
-
-        function = self._find_function(self._active_function_id)
-        if not function or not block_id:
-            return None
-        block = next(
-            (b for b in function.walk_blocks() if b.block_id == block_id),
-            None,
-        )
-        if block is None or block.block_type != "call_function":
-            return None
-        return str(block.params.get("function_id") or "") or None
+        return self._functions.get(function_id)
 
     def _on_freeze_clicked(self, checked):
         """Freeze the running event into the debug loop at priority 500."""
@@ -241,6 +294,8 @@ class DebugView(QWidget):
             if not game_dir.is_dir():
                 continue
             for event in scheduler.list_events(game_dir.name):
+                if event.profile_id != self.profile_combo.currentData():
+                    continue
                 task_ids = {
                     fid
                     for task in event.tasks

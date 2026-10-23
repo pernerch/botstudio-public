@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from threading import Lock
 import time
 from core.command_control import check_cancelled
 
@@ -36,6 +37,8 @@ class RuntimeRecoveryService:
         self.app_config_service = app_config_service
         self.statistics_service = statistics_service
         self._last_emulator_start_at = None
+        self._emulator_start_lock = Lock()
+        self._next_emulator_start_at = 0.0
 
         self.logger = (
             logger
@@ -128,12 +131,12 @@ class RuntimeRecoveryService:
                 profile,
             ):
                 self.logger.info(
-                    "ADB Reconnect Successful",
+                    "ADB Connection Verified",
                     **metadata,
                     level=1,
                     check="adb connect <device>",
                     device_id=device_id,
-                    next_action="start game via monkey",
+                    next_action="restore game foreground and verify process continuity",
                 )
 
                 package_name = self._package_name(
@@ -143,26 +146,15 @@ class RuntimeRecoveryService:
 
                 if package_name:
 
-                    if self.game_runtime_service.start_game(
+                    return self.game_runtime_service.restore_game(
                         profile,
                         device_id,
                         package_name,
-                    ):
-
-                        self.logger.info(
-                            "Recovery Successful",
-                            **metadata,
-                            level=2,
-                        )
-
-                        return {
-                            "state": "Recovering",
-                            "message": "Game start requested",
-                        }
+                    )
 
                 return {
                     "state": "Recovering",
-                    "message": "ADB reconnected",
+                    "message": "ADB connection verified; game package unavailable",
                 }
 
         package_name = self._package_name(
@@ -172,22 +164,11 @@ class RuntimeRecoveryService:
 
         if device_id and package_name:
 
-            if self.game_runtime_service.start_game(
+            return self.game_runtime_service.restore_game(
                 profile,
                 device_id,
                 package_name,
-            ):
-
-                self.logger.info(
-                    "Recovery Successful",
-                    **metadata,
-                    level=2,
-                )
-
-                return {
-                    "state": "Recovering",
-                    "message": "Game restart requested",
-                }
+            )
 
         return self._start_emulator(
             profile,
@@ -218,22 +199,18 @@ class RuntimeRecoveryService:
                     0.0,
                     float(settings.get("emulator_start_delay_seconds", 0) or 0),
                 )
-            if self._last_emulator_start_at is not None:
-                remaining = delay_seconds - (
-                    time.monotonic() - self._last_emulator_start_at
-                )
-                if remaining > 0:
-                    deadline = time.monotonic() + remaining
-                    while time.monotonic() < deadline:
-                        check_cancelled()
-                        time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+            deadline = self._reserve_emulator_start(delay_seconds)
+            while time.monotonic() < deadline:
+                check_cancelled()
+                time.sleep(min(0.05, max(0, deadline - time.monotonic())))
 
             check_cancelled()
             started = self.emulator_manager.start_instance(
                 instance
             )
             if started:
-                self._last_emulator_start_at = time.monotonic()
+                with self._emulator_start_lock:
+                    self._last_emulator_start_at = time.monotonic()
                 if self.statistics_service is not None:
                     try:
                         self.statistics_service.record_emulator_start(profile)
@@ -267,6 +244,7 @@ class RuntimeRecoveryService:
             return {
                 "state": "Recovering",
                 "message": message,
+                "emulator_started": True,
             }
 
         self.logger.warning(
@@ -285,6 +263,17 @@ class RuntimeRecoveryService:
             "state": "Failed",
             "message": "Manual emulator recovery required",
         }
+
+    def _reserve_emulator_start(self, delay_seconds):
+        with self._emulator_start_lock:
+            now = time.monotonic()
+            previous = self._last_emulator_start_at
+            deadline = max(
+                now, self._next_emulator_start_at,
+                previous + delay_seconds if previous is not None else now,
+            )
+            self._next_emulator_start_at = deadline + delay_seconds
+            return deadline
 
     def clear_profile(
         self,

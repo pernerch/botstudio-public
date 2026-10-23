@@ -218,6 +218,8 @@ class AdbService:
         device_id: str,
         package_name: str,
         timeout: int = 5,
+        *,
+        strict: bool = False,
     ) -> int | None:
 
         result = self._run(
@@ -231,6 +233,22 @@ class AdbService:
             ],
             timeout=timeout,
         )
+
+        if strict:
+            if result is None:
+                raise RuntimeError("ADB process query failed or timed out")
+            if result.returncode == 1 and not result.stdout.strip() and not result.stderr.strip():
+                return None
+            if (
+                result.returncode != 0
+                or result.stderr.strip()
+                or not result.stdout.strip()
+                or not all(value.isdigit() and int(value) > 0 for value in result.stdout.split())
+            ):
+                raise RuntimeError(
+                    f"ADB process query returned invalid output (exit {result.returncode}): "
+                    f"{result.stderr.strip() or result.stdout.strip()}"
+                )
 
         if result is None:
             return None

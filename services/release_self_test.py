@@ -194,6 +194,16 @@ def run_self_test(role: str) -> int:
         else:
             raise ValueError(f"Unsupported self-test role: {role}")
         window.setWindowIcon(icon)
+        if role == "studio" and app.platformName() == "windows":
+            from ui.windows_taskbar import (
+                apply_window_taskbar_identity,
+                clear_window_taskbar_identity,
+            )
+
+            apply_window_taskbar_identity(int(window.winId()))
+            app.aboutToQuit.connect(
+                lambda: clear_window_taskbar_identity(int(window.winId())),
+            )
         window.show()
         if not window.isVisible():
             raise RuntimeError("Qt window could not be shown")
@@ -219,6 +229,17 @@ def run_self_test(role: str) -> int:
             if report["taskbar_app_id"] != STUDIO_APP_USER_MODEL_ID:
                 raise RuntimeError("Windows taskbar identity does not match the Studio shortcut")
             if app.platformName() == "windows":
+                from ui.windows_taskbar import read_window_taskbar_identity
+
+                properties = read_window_taskbar_identity(int(window.winId()))
+                if properties[5] != STUDIO_APP_USER_MODEL_ID:
+                    raise RuntimeError("Native Studio window has no taskbar identity")
+                if properties[3] != f"{paths.resource('ui', 'botstudio.ico')},0":
+                    raise RuntimeError("Native Studio window has no explicit taskbar icon")
+                if not properties[2] or not properties[4]:
+                    raise RuntimeError("Native Studio window has incomplete relaunch metadata")
+                report["window_taskbar_app_id"] = properties[5]
+                report["window_taskbar_icon"] = properties[3]
                 send = ctypes.windll.user32.SendMessageW
                 send.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
                 send.restype = ctypes.c_ssize_t

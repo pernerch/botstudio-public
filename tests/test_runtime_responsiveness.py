@@ -15,6 +15,7 @@ from models.execution_context import ExecutionContext
 from services.function_runner import FunctionRunner
 from services.emulator_health_service import EmulatorHealthService
 from services.runtime_service import RUNTIME_ERROR, RUNTIME_PAUSED, RUNTIME_STOPPED, RuntimeService
+from services.emulator_pause_control import EmulatorPauseControl
 from services.telegram_service import TelegramService
 
 
@@ -33,6 +34,9 @@ class RuntimeResponsivenessTests(unittest.TestCase):
         self.runtime._stop_lock = Lock()
         self.runtime._stop_generation = 0
         self.runtime._pause_event = Event()
+        self.runtime._emulator_control = EmulatorPauseControl()
+        self.runtime._emulator_control.register([0, 1])
+        self.runtime.profile_statuses = []
         self.runtime._health_failures = set()
         self.runtime._wake_resources = set()
         self.runtime.running = True
@@ -83,12 +87,12 @@ class RuntimeResponsivenessTests(unittest.TestCase):
         self.runtime._startup_checked_resources = set()
         self.runtime._startup_emulator_deadlines = {}
         self.runtime._find_activation_errors = Mock(return_value={})
-        self.runtime.heartbeat_once = Mock(side_effect=self.runtime.stop)
+        self.runtime._dispatch_instance_cycles = Mock(side_effect=self.runtime.stop)
         self.runtime._start()
         self.runtime.heartbeat.start.assert_not_called()
         self.assertEqual(RUNTIME_STOPPED, self.runtime.status)
 
-    def test_pause_blocks_existing_context_and_stop_releases_it(self):
+    def test_pause_cancels_existing_context_without_waiting_for_stop(self):
         self.runtime.pause()
         self.assertEqual(RUNTIME_PAUSED, self.runtime.status)
         finished = Event()
@@ -101,12 +105,10 @@ class RuntimeResponsivenessTests(unittest.TestCase):
         worker.start()
         self.addCleanup(lambda: worker.join(1))
         self.addCleanup(self.runtime.stop)
-        self.assertFalse(finished.wait(0.1))
-        self.runtime.stop()
         self.assertTrue(finished.wait(0.5))
         self.assertEqual([True], values)
 
-    def test_resume_unblocks_existing_execution_without_restarting_runtime(self):
+    def test_resume_keeps_old_execution_cancelled_until_reinitialization(self):
         self.runtime.pause()
         finished = Event()
         values = []
@@ -116,10 +118,11 @@ class RuntimeResponsivenessTests(unittest.TestCase):
         worker.start()
         self.addCleanup(lambda: worker.join(1))
         self.addCleanup(self.runtime.stop)
-        self.assertFalse(finished.wait(0.1))
-        self.runtime.resume()
         self.assertTrue(finished.wait(0.5))
-        self.assertEqual([False], values)
+        self.runtime.resume()
+        self.assertEqual([True], values)
+        self.assertTrue(self.runtime.execution_cancelled(self.profile))
+        self.assertTrue(self.runtime.running)
 
     def test_health_monitor_cancels_only_failed_resource(self):
         self.runtime.profile_statuses = [{
@@ -282,29 +285,27 @@ class RuntimeResponsivenessTests(unittest.TestCase):
     def test_pause_does_not_change_a_stopped_runtime(self):
         self.runtime.running = False
         self.runtime.status = RUNTIME_STOPPED
-        self.runtime.pause()
+        with self.assertRaisesRegex(RuntimeError, "not running"):
+            self.runtime.pause()
         self.assertFalse(self.runtime.paused)
         self.assertEqual(RUNTIME_STOPPED, self.runtime.status)
 
-    def test_pause_does_not_turn_a_completed_command_into_a_timeout(self):
+    def test_pause_cancels_an_external_command_instead_of_continuing_it(self):
         popen = subprocess.Popen
         def start_process(*args, **kwargs):
             process = popen(*args, **kwargs)
             self.runtime.pause()
             return process
-        timer = Timer(0.15, self.runtime.resume)
-        timer.start()
-        self.addCleanup(timer.cancel)
         started = time.monotonic()
         with (
             command_control(lambda: self.runtime.execution_cancelled(self.profile)),
             patch("core.command_control.subprocess.Popen", side_effect=start_process),
         ):
-            result = run_command(
-                [sys.executable, "-c", "import time; time.sleep(0.01)"],
-                timeout=0.05,
-            )
-        self.assertEqual(0, result.returncode)
+            with self.assertRaises(CommandCancelled):
+                run_command(
+                    [sys.executable, "-c", "import time; time.sleep(0.01)"],
+                    timeout=0.05,
+                )
         self.assertLess(time.monotonic() - started, 0.5)
 
     def test_notification_batch_yields_between_chats_without_losing_delivery(self):

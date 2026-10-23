@@ -5,15 +5,21 @@ from services.reinitialize_service import get_default_reinitialize_service
 
 class AppConfigService:
 
+    SCHEDULING_DEFAULTS = {
+        "limit_profile_active_time": False,
+        "max_active_minutes": 60,
+        "scheduling_lookahead_seconds": 120,
+        "scheduling_max_wait_minutes": 120,
+    }
+
     STUDIO_SETTINGS_DEFAULTS = {
+        **SCHEDULING_DEFAULTS,
         "idle_behavior": "do_nothing",
         "max_idle_minutes": 3,
         "max_concurrent_instances": 1,
         "emulator_start_delay_seconds": 5,
         "startup_view": "game",
         "language": "en",
-        "limit_profile_active_time": False,
-        "max_active_minutes": 60,
         "stop_behavior": "do_nothing",
         "auto_start_all_profiles": False,
         "stop_behavior_telegram": "do_nothing",
@@ -104,9 +110,56 @@ class AppConfigService:
         merged = dict(self.STUDIO_SETTINGS_DEFAULTS)
         merged.update(config.get("studio_settings", {}))
         merged.update(settings)
+        self.validate_scheduling_settings({
+            key: merged[key] for key in self.SCHEDULING_DEFAULTS
+        })
         config["studio_settings"] = merged
         self.save(config)
         return merged
+
+    @classmethod
+    def validate_scheduling_settings(cls, settings: dict) -> dict:
+        """Validate a complete or partial scheduling configuration without coercion."""
+        if not isinstance(settings, dict):
+            raise ValueError("Scheduling settings must be a dictionary.")
+        unknown = set(settings) - cls.SCHEDULING_DEFAULTS.keys()
+        if unknown:
+            raise ValueError(
+                "Unknown scheduling settings: "
+                + ", ".join(sorted(str(key) for key in unknown))
+            )
+        ranges = {
+            "max_active_minutes": (1, 100000),
+            "scheduling_lookahead_seconds": (0, 3600),
+            "scheduling_max_wait_minutes": (1, 100000),
+        }
+        for key, value in settings.items():
+            if key == "limit_profile_active_time":
+                if type(value) is not bool:
+                    raise ValueError(f"{key} must be a boolean.")
+                continue
+            minimum, maximum = ranges[key]
+            if type(value) is not int or not minimum <= value <= maximum:
+                raise ValueError(
+                    f"{key} must be an integer between {minimum} and {maximum}."
+                )
+        return dict(settings)
+
+    def get_scheduling_settings(self, game_service, game_id: str) -> dict:
+        settings = dict(self.SCHEDULING_DEFAULTS)
+        settings.update({
+            key: value
+            for key, value in self.get_studio_settings().items()
+            if key in self.SCHEDULING_DEFAULTS
+        })
+        self.validate_scheduling_settings(settings)
+        if game_id:
+            settings.update(
+                self.validate_scheduling_settings(
+                    game_service.get_scheduling_overrides(game_id)
+                )
+            )
+        return self.validate_scheduling_settings(settings)
 
     def get_active_game(
         self,

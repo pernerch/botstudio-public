@@ -999,6 +999,9 @@ class RuntimeOverviewView(QWidget):
             "Recovering": "runtime.state_recovering",
             "Failed": "runtime.state_failed",
             "Queued": "runtime.state_queued",
+            "Paused": "runtime.state_paused",
+            "Pausing": "runtime.state_pausing",
+            "Resuming": "runtime.state_resuming",
         }
 
         return t(

@@ -18,6 +18,8 @@ class WatchdogProcessService:
         "studio.stop",
         "runtime.start",
         "runtime.stop",
+        "runtime.pause",
+        "runtime.resume",
         "events.list",
         "tasks.list",
         "event.enable",

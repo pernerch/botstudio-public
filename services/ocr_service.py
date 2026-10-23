@@ -4,8 +4,11 @@ import unicodedata
 from collections import Counter
 from difflib import SequenceMatcher
 from pathlib import Path
+from threading import Lock
 
 import cv2
+
+from services.vision_cpu_budget import configure_vision_cpu_budget
 
 _TIME_PATTERN = re.compile(
     r"(?<!\d)(?:(\d+)\s*[dD]\s*)?(\d{1,2})\s*[:.]\s*(\d{2})\s*[:.]\s*(\d{2})(?!\d)"
@@ -37,8 +40,10 @@ class OcrService:
     """
 
     _engine = None
+    _engine_lock = Lock()
 
     def __init__(self, app_config_service=None):
+        configure_vision_cpu_budget()
         # kept for backwards compatible construction; RapidOCR needs no config
         self.app_config_service = app_config_service
 
@@ -108,13 +113,11 @@ class OcrService:
             return None
 
         engine = self._engine_instance()
+        upscaled = self._upscale(crop)
+        candidate_images = [crop] if upscaled is crop else [crop, upscaled]
         candidates = []
-        for candidate_image, coordinate_scale in (
-            (crop, 1.0),
-            (self._upscale(crop), None),
-        ):
-            if coordinate_scale is None:
-                coordinate_scale = candidate_image.shape[1] / max(1, crop.shape[1])
+        for candidate_image in candidate_images:
+            coordinate_scale = candidate_image.shape[1] / max(1, crop.shape[1])
             result = engine(candidate_image, use_det=True, use_cls=True)
             candidates.extend(
                 self._line_candidates(
@@ -316,8 +319,15 @@ class OcrService:
     def _engine_instance(cls):
 
         if cls._engine is None:
-            from rapidocr import RapidOCR
-            cls._engine = RapidOCR()
+            with cls._engine_lock:
+                if cls._engine is None:
+                    from rapidocr import RapidOCR
+                    cls._engine = RapidOCR(params={
+                        # One inference thread avoids ONNX busy-wait pools
+                        # consuming CPU between reads, even on many-core hosts.
+                        "EngineConfig.onnxruntime.intra_op_num_threads": 1,
+                        "EngineConfig.onnxruntime.inter_op_num_threads": 1,
+                    })
         return cls._engine
 
     @staticmethod

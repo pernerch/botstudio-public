@@ -485,7 +485,7 @@ class TaskErrorContextTests(unittest.TestCase):
 
     def test_statistics_failure_does_not_invalidate_successful_emulator_start(self):
         from services.runtime_recovery_service import RuntimeRecoveryService
-        recovery = object.__new__(RuntimeRecoveryService)
+        recovery = RuntimeRecoveryService(Mock(), Mock(), Mock(), logger=self.logger)
         recovery.logger = self.logger
         recovery.app_config_service = None
         recovery._last_emulator_start_at = None

@@ -273,6 +273,7 @@ class EventControlUiTests(unittest.TestCase):
             self.assertEqual("queued", persisted.status)
             self.assertTrue(persisted.is_due())
             self.assertIn(t("scheduler.event_queued"), feedback)
+            view._runtime_service.request_schedule.assert_called_once_with("account")
             view._runtime_service.try_acquire_profile_execution.assert_not_called()
 
     def test_profile_selection_disables_event_actions_without_loading_an_event(self):

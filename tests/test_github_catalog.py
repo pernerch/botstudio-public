@@ -13,6 +13,7 @@ from unittest.mock import Mock, patch
 import requests
 
 from models.github_account import GitHubAccount, GitHubAssetUploader
+from models.bot_function import BotFunction
 from services.github_catalog_service import GitHubCatalogService
 from services.package_service import PackageError
 from ui.i18n.translator import t
@@ -122,6 +123,83 @@ class GitHubCatalogTests(unittest.TestCase):
         with self.assertRaisesRegex(PackageError, "SHA-256"):
             self.service.published_content("game", owner, packages)
         packages.archive_content_fingerprint.assert_not_called()
+
+    def publication_fixture(self, *, source_id="function", kind="function", version="1.0.9"):
+        owner = GitHubAccount("123", "owner")
+        function = BotFunction(
+            function_id=source_id, name="Local rename", game_id="local",
+            revision=2, saved=True, creator_account=owner, kind=kind,
+        )
+        identity = hashlib.sha256(f"{kind}\0local\0{source_id}".encode()).hexdigest()[:32]
+        manifest = {
+            "source_id": source_id, "package_type": kind, "game": {"id": "canonical"},
+            "package_metadata": {
+                "package_id": f"{kind}-{identity}", "publisher": owner.to_dict(),
+                "package_version": version,
+            },
+        }
+        entry = {
+            "size": 10, "package": {
+                "game_id": "canonical", "package_id": f"{kind}-{identity}",
+                "publisher": owner, "version": version,
+            },
+        }
+        self.service.load = Mock(return_value={
+            "repository_id": 1, "entries": [entry], "next_page": None,
+        })
+        self.service.download_preview = Mock(return_value={"manifest": manifest})
+        packages = Mock()
+        packages._canonical_game_id.return_value = "canonical"
+        packages.publication_sources.return_value = []
+        return function, packages, manifest, entry
+
+    def test_function_lookup_uses_stable_identity_not_display_name_or_local_revision(self):
+        for kind in ("function", "helper"):
+            with self.subTest(kind=kind):
+                function, packages, manifest, _ = self.publication_fixture(kind=kind)
+                self.assertEqual(manifest, self.service.function_publication(function, packages))
+                self.service.download_preview.assert_called_once()
+                self.assertFalse(self.service.download_preview.call_args.args[2].parent.exists())
+
+    def test_function_lookup_rejects_same_name_different_identity_and_dependencies(self):
+        function, packages, manifest, entry = self.publication_fixture()
+        entry["package"]["package_id"] = "another-package"
+        self.assertIsNone(self.service.function_publication(function, packages))
+        self.service.download_preview.assert_not_called()
+        entry["package"]["package_id"] = manifest["package_metadata"]["package_id"]
+        manifest["source_id"] = "another-root"
+        self.assertIsNone(self.service.function_publication(function, packages))
+
+    def test_copied_import_matches_preserved_root_even_when_online_version_advanced(self):
+        function, packages, manifest, _ = self.publication_fixture(version="1.0.99")
+        original = deepcopy(manifest)
+        original["package_metadata"]["package_version"] = "1.0.1"
+        function.function_id = "local-copy"
+        packages.publication_sources.return_value = [(original, self.root / "original.zip")]
+        packages.matches_publication_source.return_value = True
+        self.assertEqual(manifest, self.service.function_publication(function, packages))
+        packages.matches_publication_source.assert_called_once_with(original, "local-copy", "function")
+        packages.matches_publication_source.return_value = False
+        self.service.download_preview.reset_mock()
+        self.assertIsNone(self.service.function_publication(function, packages))
+        self.service.download_preview.assert_not_called()
+
+    def test_unpublished_draft_does_not_query_online_and_lookup_errors_are_not_absence(self):
+        function, packages, _, _ = self.publication_fixture()
+        function.saved = False
+        self.assertIsNone(self.service.function_publication(function, packages))
+        self.service.load.assert_not_called()
+        function.saved = True
+        self.service.load.side_effect = PackageError("GitHub HTTP 401")
+        with self.assertRaisesRegex(PackageError, "401"):
+            self.service.function_publication(function, packages)
+
+    def test_next_publication_version_is_newer_than_remote_without_lowering_local_version(self):
+        _, _, manifest, _ = self.publication_fixture(version="1.0.99")
+        manifest["package_metadata"]["package_version"] = "1.0.2"
+        self.assertEqual("1.0.100", self.service.next_publication_version(manifest))
+        manifest["package_metadata"]["package_version"] = "2.0.0"
+        self.assertEqual("2.0.0", self.service.next_publication_version(manifest))
 
     def test_drafts_are_excluded_prereleases_are_explicit_and_empty_is_valid(self):
         draft = {**self.release, "draft": True}

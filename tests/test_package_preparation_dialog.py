@@ -140,6 +140,104 @@ class PackagePreparationDialogTests(unittest.TestCase):
         self.assertTrue(image.save(str(path), "PNG"))
         return path
 
+    def test_editor_publication_selects_exact_source_and_uploads_only_after_confirmation(self):
+        other = BotFunction(
+            function_id="aaa", name="AAA first", game_id="game", saved=True,
+            creator_account=GitHubAccount("120588088", "pernerch"),
+        )
+        (self.function_root / "game" / "aaa.json").write_text(
+            json.dumps(other.to_dict()), encoding="utf-8",
+        )
+        outbox = PackageOutboxService(self.package_service, self.root / "outbox")
+        self.catalog_service.next_publication_version.return_value = "1.0.100"
+        publisher = Mock()
+        publisher.submit.return_value = {"url": "https://github.com/pernerch/botstudio-catalog/pull/123"}
+        with patch("ui.widgets.package_preparation_dialog.GitHubSubmissionService", return_value=publisher):
+            dialog = PackagePreparationDialog(
+                package_service=self.package_service, game_id="game", simple_flow=True,
+                source_id="example", source_kind="function", publish_after_pack=True,
+                outbox_service=outbox,
+            )
+            self.addCleanup(dialog.deleteLater)
+            self.wait_for_idle(dialog)
+            self.assertEqual("example", dialog.source.currentData())
+            self.assertEqual("function", dialog.kind.currentData())
+            self.assertFalse(dialog.source.isEnabled())
+            self.assertFalse(dialog.game.isEnabled())
+            self.assertFalse(dialog.kind.isEnabled())
+            self.assertFalse(dialog.preview_button.isEnabled())
+            publisher.submit.assert_not_called()
+            dialog.rights.setChecked(True)
+            dialog.preview_button.click()
+            self.wait_for_idle(dialog)
+        publisher.submit.assert_called_once()
+        archives = outbox.list_packages()
+        self.assertEqual(1, len(archives))
+        self.assertEqual("1.0.100", archives[0]["version"])
+        self.assertEqual(publisher.submit.return_value, archives[0]["publication"])
+        manifest = self.package_service.inspect_package(archives[0]["path"])
+        self.assertEqual("example", manifest["source_id"])
+        self.assertIn(publisher.submit.return_value["url"], dialog.status.text())
+        self.assertFalse(dialog.preview_button.isEnabled())
+
+    def test_editor_upload_failure_keeps_prepared_package_and_never_retries_automatically(self):
+        outbox = PackageOutboxService(self.package_service, self.root / "outbox")
+        self.catalog_service.next_publication_version.return_value = "1.0.100"
+        publisher = Mock()
+        publisher.submit.side_effect = PackageError("GitHub HTTP 401")
+        with patch("ui.widgets.package_preparation_dialog.GitHubSubmissionService", return_value=publisher):
+            dialog = PackagePreparationDialog(
+                package_service=self.package_service, game_id="game", simple_flow=True,
+                source_id="example", publish_after_pack=True, outbox_service=outbox,
+            )
+            self.addCleanup(dialog.deleteLater)
+            self.wait_for_idle(dialog)
+            dialog.rights.setChecked(True)
+            dialog.preview_button.click()
+            self.wait_for_idle(dialog)
+        publisher.submit.assert_called_once()
+        self.assertIn("401", dialog.status.text())
+        archives = outbox.list_packages()
+        self.assertEqual(1, len(archives))
+        self.assertIsNone(archives[0]["publication"])
+        self.assertNotEqual(QDialog.Accepted, dialog.result())
+
+    def test_missing_editor_source_never_selects_a_different_function(self):
+        dialog = PackagePreparationDialog(
+            package_service=self.package_service, game_id="game", simple_flow=True,
+            source_id="missing", publish_after_pack=True,
+        )
+        self.addCleanup(dialog.deleteLater)
+        self.wait_for_idle(dialog)
+        self.assertIsNone(dialog.source.currentData())
+        self.assertFalse(dialog.preview_button.isEnabled())
+
+    def test_editor_publication_rechecks_online_presence_before_packing(self):
+        self.catalog_service.function_publication.return_value = None
+        outbox = PackageOutboxService(self.package_service, self.root / "outbox")
+        dialog = PackagePreparationDialog(
+            package_service=self.package_service, game_id="game", simple_flow=True,
+            source_id="example", publish_after_pack=True, outbox_service=outbox,
+        )
+        self.addCleanup(dialog.deleteLater)
+        self.wait_for_idle(dialog)
+        dialog.rights.setChecked(True)
+        dialog.preview_button.click()
+        self.wait_for_idle(dialog)
+        self.assertEqual([], outbox.list_packages())
+        self.assertIn(t("function.publication_no_longer_online"), dialog.status.text())
+
+    def test_editor_publication_does_not_fall_back_to_another_game(self):
+        dialog = PackagePreparationDialog(
+            package_service=self.package_service, game_id="missing", simple_flow=True,
+            source_id="example", publish_after_pack=True,
+        )
+        self.addCleanup(dialog.deleteLater)
+        self.wait_for_idle(dialog)
+        self.assertIsNone(dialog.game.currentData())
+        self.assertIsNone(dialog.source.currentData())
+        self.assertFalse(dialog.preview_button.isEnabled())
+
     def test_simple_check_and_pack_persists_archive_without_preview_or_save_dialog(self):
         outbox = PackageOutboxService(self.package_service, self.root / "outbox")
         dialog = PackagePreparationDialog(

@@ -30,7 +30,10 @@ class TelegramControlMenu:
                  ("Stop Studio", "studio_stop"),
                  ("Restart Studio", "studio_restart"))
                 if command == "studio"
-                else (("Start Runtime", "runtime_start"), ("Stop Runtime", "runtime_stop"))
+                else (("Start Runtime", "runtime_start"), ("Stop Runtime", "runtime_stop"),
+                      ("Pause all emulators", "runtime_pause all"),
+                      ("Resume all (reinitialize)", "runtime_resume all"),
+                      ("Choose emulator", "emulators"))
             )
             return TelegramMenu(
                 f"{command.title()} controls. Actions require confirmation.",
@@ -111,8 +114,13 @@ class TelegramControlMenu:
                 buttons.append((label, f"menu_event {entry['event_id']} {entry['profile_id']}"))
             elif command == "emulators":
                 label = f"Instance {entry['instance']}: {'running' if entry['running'] else 'stopped'}"
-                lines.append(label)
+                automation = entry.get("automation", "unknown")
+                lines.append(f"{label} | automation: {automation}")
+                if entry.get("pause_error"):
+                    lines.append(f"Resume failed: {entry['pause_error']}")
                 buttons.append((f"Restart {label}", f"emulator_restart {entry['instance']}"))
+                buttons.append((f"Pause instance {entry['instance']}", f"runtime_pause {entry['instance']}"))
+                buttons.append((f"Resume instance {entry['instance']} (init)", f"runtime_resume {entry['instance']}"))
             else:
                 lines.append(
                     f"{entry['profile_name'][:32]} / {entry['event_name'][:32]} / "

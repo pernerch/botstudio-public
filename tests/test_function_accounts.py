@@ -306,16 +306,21 @@ class FunctionAccountTests(unittest.TestCase):
 
     def test_creator_and_latest_modifier_display_as_stored_attribution(self):
         function = BotFunction.create("New", "game", "")
-        function.bump_revision("", account=self.creator)
+        creator = GitHubAccount("123", "creator" + "x" * 32)
+        function.bump_revision("", account=creator)
         function.bump_revision("", account=self.modifier)
         label = QLabel()
         self.addCleanup(label.deleteLater)
         editor = SimpleNamespace(current_function=function, package_origin_label=label)
         FunctionEditorView._refresh_package_origin(editor)
-        self.assertIn("@creator", label.text())
-        self.assertIn("@modifier", label.text())
-        self.assertIn("123", label.text())
-        self.assertIn("456", label.text())
+        self.assertIn("@creator", label.toolTip())
+        self.assertIn(creator.login, label.toolTip())
+        self.assertIn("@modifier", label.toolTip())
+        self.assertIn("123", label.toolTip())
+        self.assertIn("456", label.toolTip())
+        self.assertNotIn("@creator", label.text())
+        self.assertNotIn("GitHub", label.text())
+        self.assertNotIn("\n", label.text())
 
     def test_deferred_dependency_notifications_replay_and_default_stays_synchronous(self):
         service = ReinitializeService()

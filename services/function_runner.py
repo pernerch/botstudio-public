@@ -119,6 +119,8 @@ class FunctionRunner:
         # optional callable(block, context) fired before each block; the
         # debug screen subscribes to drive the live block highlight
         self.block_observer = None
+        self._debug_functions = {}
+        self._debug_announced = {}
     
     @staticmethod
     def _cancellable_sleep(context, seconds: float) -> bool:
@@ -131,6 +133,40 @@ class FunctionRunner:
                 return True
             time.sleep(min(0.05, remaining))
 
+    def _publish_debug_event(self, event, context, **details):
+        from services.debug_pacing_service import DebugEventHub, DebugPacingService
+
+        generation = DebugPacingService.instance().observation_generation(context.profile_id)
+        if generation is None:
+            return
+        function = self._debug_functions.get(context.execution_id)
+        if function is None:
+            return
+        hub = DebugEventHub.instance()
+        identity = {
+            "execution_id": context.execution_id,
+            "parent_id": context.parent_id,
+            "profile_id": context.profile_id,
+            "game_id": context.game_id,
+            "function_id": context.function_id,
+            "debug_generation": generation,
+        }
+        if self._debug_announced.get(context.execution_id) != generation:
+            if not hub.publish({
+                **identity,
+                "event": "function_started",
+                "function": function.to_dict(),
+            }):
+                return
+            self._debug_announced[context.execution_id] = generation
+        if event != "function_started":
+            hub.publish({
+                **identity,
+                "event": event,
+                "variables": context.snapshot(),
+                **details,
+            })
+
     def run(
         self,
         function: BotFunction,
@@ -141,12 +177,15 @@ class FunctionRunner:
         activity = getattr(self, "activity_service", None)
         started_at = time.perf_counter()
         outcome = OUTCOME_FAILED
+        self._debug_functions[context.execution_id] = function
         with activity.track(function, context, profile) if activity is not None else nullcontext():
             try:
                 result = self._run(function, context, profile, selected_block_id)
                 outcome = result.get("outcome", OUTCOME_FAILED)
                 return result
             finally:
+                self._debug_functions.pop(context.execution_id, None)
+                self._debug_announced.pop(context.execution_id, None)
                 context.function_executions.append({
                     "function_id": function.function_id,
                     "outcome": outcome,
@@ -175,6 +214,7 @@ class FunctionRunner:
             parent_id=context.parent_id,
             selected_block_id=selected_block_id or "",
         )
+        self._publish_debug_event("function_started", context)
 
         if selected_block_id:
             selected = next(
@@ -291,6 +331,12 @@ class FunctionRunner:
             variable_accesses=context.variable_accesses,
         )
 
+        self._publish_debug_event(
+            "function_failed" if result.get("outcome") == OUTCOME_FAILED else "function_finished",
+            context,
+            outcome=result.get("outcome"),
+            error=result.get("error"),
+        )
         return result
 
     def _debug_blocks(
@@ -375,6 +421,7 @@ class FunctionRunner:
                 local=True,
             )
 
+        access_start = len(context.variable_accesses)
         outcome, value, error = self.run_block(block, context, profile)
         debug_payload = None
         stored_value = value
@@ -397,11 +444,22 @@ class FunctionRunner:
             try:
                 context.set(block.output_as, stored_value)
             except Exception as write_error:
+                reason = f"output variable '{block.output_as}' could not be written: {write_error}"
+                self.trace[-1]["outcome"] = OUTCOME_FAILED
+                self.trace[-1]["error"] = reason
+                self._log_block_execution(
+                    function, block, context, profile, OUTCOME_FAILED,
+                    stored_value, debug_payload, reason, access_start,
+                )
                 return (
                     OUTCOME_FAILED,
                     stored_value,
-                    f"output variable '{block.output_as}' could not be written: {write_error}",
+                    reason,
                 )
+        self._log_block_execution(
+            function, block, context, profile, outcome,
+            stored_value, debug_payload, error, access_start,
+        )
         return outcome, stored_value, error
 
     def _entry_blocks(
@@ -514,6 +572,7 @@ class FunctionRunner:
                 continue
 
             self._block_failure = None
+            access_start = len(context.variable_accesses)
             outcome, value, error = self.run_block(
                 block,
                 context,
@@ -540,18 +599,6 @@ class FunctionRunner:
                 "event_stop_requested": context.event_stop_requested,
                 "reschedule_after_seconds": context.event_reschedule_seconds,
             })
-
-            self.logger.info(
-                "Function Block Executed",
-                profile=profile.get("name") if profile else None,
-                function_id=function.function_id,
-                execution_id=context.execution_id,
-                parent_id=context.parent_id,
-                block_id=block.block_id,
-                block_type=block.block_type,
-                outcome=outcome,
-                value=self._summarize_value(stored_value),
-            )
 
             if block.output_as:
                 # a rejected typed or scoped write is a data condition
@@ -580,12 +627,21 @@ class FunctionRunner:
                         variable=block.output_as,
                         error=str(write_error),
                     )
+                    self._log_block_execution(
+                        function, block, context, profile, OUTCOME_FAILED,
+                        stored_value, debug_payload, reason, access_start,
+                    )
                     return self._result(
                         context,
                         OUTCOME_FAILED,
                         None,
                         block.block_id,
                     )
+
+            self._log_block_execution(
+                function, block, context, profile, outcome,
+                stored_value, debug_payload, error, access_start,
+            )
 
             if context.event_stop_requested:
                 self.logger.info(
@@ -921,7 +977,13 @@ class FunctionRunner:
     def _run_block(self, block, context, profile):
         # debug pacing: only active when Debug Mode is on, otherwise a no-op
         from services.debug_pacing_service import DebugPacingService
-        if not DebugPacingService.instance().before_block(context.is_cancelled):
+        self._publish_debug_event(
+            "block_started", context,
+            block_id=block.block_id, block_type=block.block_type,
+        )
+        if not DebugPacingService.instance().before_block(
+            context.is_cancelled, context.profile_id,
+        ):
             return OUTCOME_FAILED, None, "cancelled"
 
         if self.block_observer is not None:
@@ -995,13 +1057,15 @@ class FunctionRunner:
             if block.block_type == BLOCK_SWIPE_SEARCH_TAP:
                 return self._swipe_search_tap(params, profile, context)
 
-            if block.block_type == BLOCK_SEARCH_OCR:
-                return self._search_ocr(
-                    params,
-                    profile,
+            if block.block_type in (BLOCK_SEARCH_OCR, BLOCK_SEARCH_OCR_TAP):
+                coordinates = context.get(f"__coordinates_{block.block_id}__")
+                params = dict(params)
+                params["region"] = resolve_ocr_region(
+                    {"region": params.get("region")},
+                    coordinates if isinstance(coordinates, dict) else None,
                 )
-
-            if block.block_type == BLOCK_SEARCH_OCR_TAP:
+                if block.block_type == BLOCK_SEARCH_OCR:
+                    return self._search_ocr(params, profile)
                 return self._search_ocr_tap(params, profile, context)
 
             if block.block_type == BLOCK_ANDROID_BACK:
@@ -1299,6 +1363,19 @@ class FunctionRunner:
             if not isfinite(delay) or delay < 0:
                 return OUTCOME_FAILED, None, "reschedule delay must be finite and nonnegative seconds"
         due_at = context.event_due_handler(target, delay)
+        self.logger.info(
+            "Function Event Due Date Adjusted",
+            game=context.game_id,
+            profile_id=context.profile_id,
+            function_id=context.function_id,
+            execution_id=context.execution_id,
+            parent_id=context.parent_id,
+            event_id=context.event_id,
+            block_id=block.block_id,
+            target_event=target,
+            delay_seconds=delay,
+            due_at=due_at,
+        )
         return OUTCOME_OK, due_at, None
 
     def _stop_event(self, block, context):
@@ -2295,6 +2372,19 @@ class FunctionRunner:
                 params.get("expect", "text"),
                 default,
             )
+            self.logger.warning(
+                "Function OCR Default Used",
+                profile=profile.get("name"),
+                game=context.game_id,
+                profile_id=context.profile_id,
+                function_id=context.function_id,
+                execution_id=context.execution_id,
+                parent_id=context.parent_id,
+                block_id=block.block_id,
+                expect=params.get("expect", "text"),
+                value=self._summarize_value(value),
+                error=str(ex),
+            )
 
         return OUTCOME_OK, value, None
 
@@ -2409,6 +2499,52 @@ class FunctionRunner:
             if step and isinstance(step.get("failure"), dict):
                 result["failure"] = step["failure"]
         return result
+
+    def _log_block_execution(
+        self, function, block, context, profile, outcome,
+        value, debug_payload, error, access_start,
+    ):
+        accesses = context.variable_accesses[access_start:]
+        metadata = {
+            "function_name": function.name,
+            "block_name": block.name,
+            "outcome": outcome,
+            "value": self._summarize_value(value),
+            "output_as": block.output_as,
+            "variable_accesses": [
+                {
+                    **entry,
+                    "value": self._summarize_value(entry.get("value")),
+                }
+                for entry in accesses[-32:]
+            ],
+        }
+        if len(accesses) > 32:
+            metadata["variable_accesses_omitted"] = len(accesses) - 32
+        if debug_payload is not None:
+            metadata["calculation"] = {
+                key: self._summarize_value(item)
+                for key, item in debug_payload.items()
+            }
+        if block.block_type in (BLOCK_DURATION_PARSE, BLOCK_DUE_DATE_REMAINING):
+            raw = block.params.get("input")
+            if not isinstance(raw, str) or not raw.startswith("$"):
+                metadata["input"] = self._summarize_value(raw)
+        if error:
+            metadata["error"] = error
+        self.logger.info(
+            "Function Block Executed",
+            profile=profile.get("name") if profile else None,
+            game=context.game_id,
+            profile_id=context.profile_id,
+            function_id=function.function_id,
+            execution_id=context.execution_id,
+            parent_id=context.parent_id,
+            event_id=context.event_id,
+            block_id=block.block_id,
+            block_type=block.block_type,
+            **metadata,
+        )
 
     @staticmethod
     def format_trace(trace) -> str:

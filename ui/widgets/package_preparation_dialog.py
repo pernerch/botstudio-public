@@ -11,6 +11,9 @@ from PySide6.QtWidgets import (
 
 from services.package_service import PackageError, PackageService
 from services.package_outbox_service import PackageOutboxService
+from services.catalog_submission_service import CatalogSubmissionService
+from services.github_submission_service import GitHubSubmissionService
+from services.managed_package_service import ManagedPackageService
 from models.bot_function import FUNCTION_KIND_HELPER
 from services.package_description_service import PackageDescriptionService
 from services.package_license_service import PackageLicenseError
@@ -54,6 +57,9 @@ class PackagePreparationDialog(QDialog):
         catalog_service=None,
         simple_flow=False,
         outbox_service=None,
+        source_id=None,
+        source_kind="function",
+        publish_after_pack=False,
     ):
         super().__init__(parent)
         self.package_service = package_service or PackageService()
@@ -63,6 +69,12 @@ class PackagePreparationDialog(QDialog):
         self.auth_service = auth_service or GitHubAuthService()
         self.catalog_service = catalog_service or GitHubCatalogService()
         self.simple_flow = simple_flow
+        self.selected_source_id = source_id
+        self.selected_source_kind = source_kind
+        self.publish_after_pack = publish_after_pack
+        self._upload_in_progress = False
+        if publish_after_pack and (not simple_flow or not source_id or not game_id):
+            raise ValueError("editor publication requires a fixed Game, source and simple flow")
         self.outbox_service = outbox_service or PackageOutboxService(self.package_service)
         self._pack_requested = False
         self._source_descriptions = {}
@@ -86,6 +98,8 @@ class PackagePreparationDialog(QDialog):
         self.kind.addItem(t("packages.prepare_function"), "function")
         self.kind.addItem(t("packages.catalog_type_helper"), "helper")
         self.kind.addItem(t("packages.prepare_event"), "event")
+        if source_id is not None:
+            self.kind.setCurrentIndex(self.kind.findData(source_kind))
         self.source = QComboBox()
         self.name = QLineEdit()
         self.version = QLineEdit()
@@ -104,7 +118,12 @@ class PackagePreparationDialog(QDialog):
         form.addRow(t("packages.prepare_description"), description_row)
         layout.addLayout(form)
         self.show_published = QCheckBox(t("packages.prepare_show_published"))
+        self.show_published.setChecked(source_id is not None)
         layout.addWidget(self.show_published)
+        if publish_after_pack:
+            notice = QLabel(t("packages.upload_notice"))
+            notice.setWordWrap(True)
+            layout.addWidget(notice)
         self.catalog_status = QLabel()
         self.catalog_status.setWordWrap(True)
         layout.addWidget(self.catalog_status)
@@ -112,6 +131,8 @@ class PackagePreparationDialog(QDialog):
         self.preview_button = QPushButton(t("packages.prepare_preview"))
         if simple_flow:
             self.preview_button.setText(t("packages.check_pack"))
+        if publish_after_pack:
+            self.preview_button.setText(t("function.publish_version"))
         layout.addWidget(self.preview_button)
         self.details = QTextBrowser()
         self.details.setOpenLinks(False)
@@ -164,7 +185,10 @@ class PackagePreparationDialog(QDialog):
         self._set_busy(False)
         if error:
             self._pack_requested = False
-            self.status.setText(t("packages.prepare_failed").format(error=error))
+            key = "function.publish_upload_failed" if self._upload_in_progress else "packages.prepare_failed"
+            self._upload_in_progress = False
+            self.status.setText(t(key).format(error=error))
+            self.status.setToolTip(error)
             return
         if self._completion:
             self._completion(result)
@@ -177,6 +201,9 @@ class PackagePreparationDialog(QDialog):
         ):
             control.setEnabled(not busy)
         self.close_button.setEnabled(not busy)
+        if self.selected_source_id is not None:
+            for control in (self.game, self.kind, self.source, self.show_published):
+                control.setEnabled(False)
         if busy:
             self.status.setText(t("packages.prepare_working"))
         else:
@@ -184,7 +211,7 @@ class PackagePreparationDialog(QDialog):
         self._update_controls()
 
     def _games_loaded(self, games):
-        selected_index = 0
+        selected_index = -1 if self.selected_source_id is not None else 0
         self.game.blockSignals(True)
         for game in games:
             game_id = str(game.get("id") or game.get("game_id") or "")
@@ -194,11 +221,12 @@ class PackagePreparationDialog(QDialog):
             self.game.addItem(label, game_id)
             if game_id == self.game_id:
                 selected_index = self.game.count() - 1
-        if self.game.count():
+        if self.game.count() and selected_index >= 0:
             self.game.setCurrentIndex(selected_index)
             self.game.blockSignals(False)
             self._sources_changed()
         else:
+            self.game.setCurrentIndex(-1)
             self.game.blockSignals(False)
             self.status.setText(t("packages.prepare_no_games"))
 
@@ -246,7 +274,7 @@ class PackagePreparationDialog(QDialog):
                 if account is None:
                     raise PackageError(t("packages.prepare_catalog_sign_in"))
                 published = self.catalog_service.published_content(
-                    game_id, account, self.package_service,
+                    self.package_service._canonical_game_id(game_id), account, self.package_service,
                 )
             except (PackageError, GitHubAuthError, OSError) as error:
                 return sources, str(error), 0
@@ -339,8 +367,10 @@ class PackagePreparationDialog(QDialog):
         self.source.blockSignals(True)
         for source_id, label, _, _ in sources:
             self.source.addItem(label, source_id)
+        if self.selected_source_id is not None:
+            self.source.setCurrentIndex(self.source.findData(self.selected_source_id))
         self.source.blockSignals(False)
-        if not sources:
+        if not sources or self.source.currentIndex() < 0:
             self.status.setText(t("packages.prepare_no_sources"))
             self._update_controls()
             return
@@ -425,12 +455,25 @@ class PackagePreparationDialog(QDialog):
 
         def create_preview():
             publication_account = self.auth_service.restore()
+            if self.publish_after_pack:
+                function = self.package_service.load_saved_function(game_id, source_id)
+                if self.catalog_service.function_publication(function, self.package_service) is None:
+                    raise PackageError(t("function.publication_no_longer_online"))
             preview = self._source_preview(
                 game_id, kind, source_id, package_name, description, package_assets,
                 publication_account, package_version,
             )
+            if self.publish_after_pack and package_version is None:
+                next_version = self.catalog_service.next_publication_version(preview["manifest"])
+                if next_version != preview["manifest"]["package_metadata"]["package_version"]:
+                    preview = self._source_preview(
+                        game_id, kind, source_id, package_name, description, package_assets,
+                        publication_account, next_version,
+                    )
             if publication_account is not None and preview["content_fingerprint"] in (
-                self.catalog_service.published_content(game_id, publication_account, self.package_service)
+                self.catalog_service.published_content(
+                    self.package_service._canonical_game_id(game_id), publication_account, self.package_service,
+                )
             ):
                 raise PackageError(t("packages.prepare_already_published"))
 
@@ -539,7 +582,7 @@ class PackagePreparationDialog(QDialog):
             if account is None or account.to_dict() != manifest_metadata["publisher"]:
                 raise PackageError(t("packages.prepare_catalog_sign_in"))
             if preview["content_fingerprint"] in self.catalog_service.published_content(
-                game_id, account, self.package_service,
+                self.package_service._canonical_game_id(game_id), account, self.package_service,
             ):
                 raise PackageError(t("packages.prepare_already_published"))
             with TemporaryDirectory(prefix="botstudio-package-") as temporary:
@@ -579,6 +622,17 @@ class PackagePreparationDialog(QDialog):
         self._run(create_archive, self._archive_created)
 
     def _archive_created(self, output):
+        if self.publish_after_pack:
+            def upload():
+                managed = ManagedPackageService(packages=self.package_service)
+                submission = GitHubSubmissionService(
+                    preflight=CatalogSubmissionService(managed=managed),
+                )
+                return self.outbox_service.upload(output, managed, submission)
+
+            self._upload_in_progress = True
+            self._run(upload, self._publication_submitted)
+            return
         self.status.setText(
             t("packages.prepare_complete").format(path=output)
         )
@@ -589,6 +643,15 @@ class PackagePreparationDialog(QDialog):
                 t("packages.prepare_complete").format(path=output),
             )
         self.accept()
+
+    def _publication_submitted(self, result):
+        self._upload_in_progress = False
+        message = t("packages.submission_sent").format(url=result["url"])
+        self.details.setPlainText(message)
+        self.status.setText(message)
+        self._draft_ready = False
+        self.rights.setChecked(False)
+        self._update_controls()
 
     def _update_controls(self):
         has_source = bool(self.source.currentData()) and self._draft_ready

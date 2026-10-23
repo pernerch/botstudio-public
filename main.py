@@ -66,6 +66,7 @@ def main():
     from services.theme_service import ThemeService
     from ui.views.main_window import MainWindow
     from ui.app_icon import load_app_icon
+    from ui.windows_taskbar import apply_window_taskbar_identity, clear_window_taskbar_identity
 
     install_exception_logging()
 
@@ -126,6 +127,10 @@ def main():
         1800,
         1000,
     )
+
+    if app.platformName() == "windows":
+        apply_window_taskbar_identity(int(window.winId()))
+        app.aboutToQuit.connect(lambda: clear_window_taskbar_identity(int(window.winId())))
 
     window.show()
     QTimer.singleShot(0, window.telegram_remote_control_view.github_account.restore_session)
